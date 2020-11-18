@@ -3,17 +3,14 @@ use actix_web::{
     get, http::header::ContentDisposition, http::header::DispositionParam,
     http::header::DispositionType, web, App, Error, HttpServer, Responder,
 };
+use rand::{thread_rng, Rng};
 use rusqlite::{Connection, NO_PARAMS};
+use std::collections::BTreeMap;
 use std::path::Path;
 use walkdir::WalkDir;
 
 const GL_PORT: i16 = 81i16;
-const GL_RATING_UPPER: i16 = 500i16;
 const GL_RATING_BASE: i16 = 400i16;
-const GL_RATING_LOWER: i16 = 300i16;
-const GL_UPVOTE_VALUE: i16 = 10i16;
-const GL_DOWNVOTE_VALUE: i16 = 10i16;
-const GL_DOWNVOTE_MINI_VALUE: i16 = 5i16;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -82,7 +79,8 @@ async fn net_files() -> impl Responder {
 
 #[get("/random_id")]
 async fn net_get_random_id() -> impl Responder {
-    db_random_id()
+    //db_random_id()
+    get_weighted_random_id()
 }
 
 #[get("/songs/{id}")]
@@ -102,58 +100,36 @@ async fn net_song_random() -> Result<NamedFile, Error> {
 
 #[get("/upvote/{id}")]
 async fn net_song_upvote_by_id(web::Path(id): web::Path<u32>) -> impl Responder {
-    let val = db_int_read(&format!("SELECT rating FROM songs WHERE id = {}", id));
-    if val <= GL_RATING_UPPER - GL_UPVOTE_VALUE {
-        let i = &format!(
-            "Update songs set rating = rating + {} where id = {}",
-            GL_UPVOTE_VALUE, id
-        );
-        db_execute(i);
-    } else {
-        let i = &format!(
-            "Update songs set rating = {} where id = {}",
-            GL_RATING_UPPER, id
-        );
-        db_execute(i);
+    let upper = db_uint32_read("select count(*) * 10 from songs");
+    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id));
+    val *= 2;
+
+    if val > upper {
+        val = upper;
     }
+
+    let i = &format!("Update songs set rating = {} where id = {}", val, id);
+    db_execute(i);
     "Ok"
 }
 
 #[get("/downvote/{id}")]
 async fn net_song_downvote_by_id(web::Path(id): web::Path<u32>) -> impl Responder {
-    let val = db_int_read(&format!("SELECT rating FROM songs WHERE id = {}", id));
-    if val >= GL_RATING_LOWER + GL_DOWNVOTE_VALUE {
-        let i = &format!(
-            "Update songs set rating = rating - {} where id = {}",
-            GL_DOWNVOTE_VALUE, id
-        );
-        db_execute(i);
-    } else {
-        let i = &format!(
-            "Update songs set rating = {} where id = {}",
-            GL_RATING_LOWER, id
-        );
-        db_execute(i);
-    }
+    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id));
+    val /= 2;
+
+    let i = &format!("Update songs set rating = {} where id = {}", val, id);
+    db_execute(i);
     "Ok"
 }
 
 #[get("/downvote_mini/{id}")]
 async fn net_song_downvote_mini_by_id(web::Path(id): web::Path<u32>) -> impl Responder {
-    let val = db_int_read(&format!("SELECT rating FROM songs WHERE id = {}", id));
-    if val >= GL_RATING_LOWER + GL_DOWNVOTE_MINI_VALUE {
-        let i = &format!(
-            "Update songs set rating = rating - {} where id = {}",
-            GL_DOWNVOTE_MINI_VALUE, id
-        );
-        db_execute(i);
-    } else {
-        let i = &format!(
-            "Update songs set rating = {} where id = {}",
-            GL_RATING_LOWER, id
-        );
-        db_execute(i);
-    }
+    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id));
+    val = (val as f64 * 0.66) as u32;
+
+    let i = &format!("Update songs set rating = {} where id = {}", val, id);
+    db_execute(i);
     "Ok"
 }
 
@@ -174,9 +150,9 @@ fn get_file_by_name(path: &str) -> NamedFile {
         })
 }
 
-fn db_int_read(sql: &str) -> i16 {
+fn db_uint32_read(sql: &str) -> u32 {
     let c = get_db_con();
-    let val: i16 = c
+    let val: u32 = c
         .query_row(sql, NO_PARAMS, |row| row.get(0))
         .expect("db_str_read error");
     val
@@ -199,10 +175,10 @@ fn db_random_path() -> String {
     db_str_read("SELECT path FROM songs ORDER BY ABS(RANDOM() * rating) desc limit 1")
 }
 
-fn db_random_id() -> String {
-    let v = db_int_read("SELECT id FROM songs ORDER BY ABS(RANDOM() * rating) desc limit 1");
-    return v.to_string();
-}
+//fn db_random_id() -> String {
+//    let v = db_int_read("SELECT id FROM songs ORDER BY ABS(RANDOM() * rating) desc limit 1");
+//    return v.to_string();
+//}
 
 fn create_table() -> String {
     let c = get_db_con();
@@ -215,4 +191,50 @@ fn create_table() -> String {
 
 fn get_db_con() -> Connection {
     Connection::open("songdb.sqlite").expect("DB Open error")
+}
+
+struct Entry {
+    rating: u32,
+    id: u16,
+}
+
+fn get_weighted_random_id() -> String {
+    let mut map = BTreeMap::new();
+    let mut max = 0u32;
+
+    let c = get_db_con();
+    let mut stmt = c
+        .prepare("select rating, id from songs")
+        .expect("db error fetching songs");
+    let rows = stmt
+        .query_map(NO_PARAMS, |row| {
+            Ok(Entry {
+                rating: row.get(0).expect("get rating error"),
+                id: row.get(1).expect("get id error"),
+            })
+        })
+        .unwrap();
+
+    // get data from db
+
+    for row in rows {
+        let a = row.expect("unwrapping id");
+
+        // put data into map (count), add values
+        map.insert(max, a.id);
+
+        max += a.rating;
+    }
+
+    // generate random number 0 .. max
+    let mut rng = thread_rng();
+    let random = rng.gen_range(0, max + 1);
+
+    let b = *(map.range(..random).next_back().expect("result error").1);
+    b.to_string()
+
+    // https://stackoverflow.com/a/49600137/12591389 :
+    //
+    // println!("maximum in map less than {}: {:?}",
+    // key, map.range(..key).next_back().unwrap());
 }
