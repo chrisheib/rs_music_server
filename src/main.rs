@@ -1,7 +1,11 @@
 use actix_files::NamedFile;
 use actix_web::{
-    get, http::header::ContentDisposition, http::header::DispositionParam,
-    http::header::DispositionType, web, App, Error, HttpServer, Responder,
+    error::{ErrorInternalServerError, ErrorNotFound},
+    get,
+    http::header::ContentDisposition,
+    http::header::DispositionParam,
+    http::header::DispositionType,
+    web, App, Error, HttpServer,
 };
 use rand::{thread_rng, Rng};
 use rusqlite::{Connection, NO_PARAMS};
@@ -32,7 +36,7 @@ async fn main() -> std::io::Result<()> {
 }
 
 #[get("/reset")]
-async fn net_files() -> impl Responder {
+async fn net_files() -> Result<String, Error> {
     let mut result: String = "".to_string();
     let mut values: String = "".to_string();
     let mut size: u64 = 0;
@@ -44,12 +48,15 @@ async fn net_files() -> impl Responder {
         .filter(|f| {
             f.path()
                 .to_str()
-                .expect("File error")
+                .unwrap_or("")
                 .to_lowercase()
                 .ends_with(".mp3")
         })
         .for_each(|e| {
-            size += e.metadata().unwrap().len();
+            size += match e.metadata() {
+                Ok(ok) => ok.len(),
+                Err(_) => 0,
+            };
             let p = e.path().display().to_string();
             result = format!("{}{}\n", result, p);
             // Statement-Values aufbauen
@@ -64,21 +71,21 @@ async fn net_files() -> impl Responder {
         });
     println!("{}", size);
 
-    create_table();
+    create_table()?;
     if !values.is_empty() {
         let statement = &format!(
             "INSERT INTO SONGS (path, name, rating, vote) values {};",
             &values[..values.len() - 1]
         );
 
-        db_execute(statement)
+        db_execute(statement)?;
     }
 
-    return result;
+    Ok(result)
 }
 
 #[get("/random_id")]
-async fn net_get_random_id() -> impl Responder {
+async fn net_get_random_id() -> Result<String, Error> {
     //db_random_id()
     get_weighted_random_id()
 }
@@ -86,22 +93,22 @@ async fn net_get_random_id() -> impl Responder {
 #[get("/songs/{id}")]
 async fn net_song_by_id(web::Path(id): web::Path<u32>) -> Result<NamedFile, Error> {
     let i = &format!("SELECT path FROM songs WHERE id = {}", id);
-    let val = db_str_read(i);
+    let val = db_str_read(i)?;
 
-    Ok(get_file_by_name(&val))
+    get_file_by_name(&val)
 }
 
 #[get("/songs/random")]
 async fn net_song_random() -> Result<NamedFile, Error> {
-    let val = db_random_path();
+    let val = db_random_path()?;
 
-    Ok(get_file_by_name(&val))
+    get_file_by_name(&val)
 }
 
 #[get("/upvote/{id}")]
-async fn net_song_upvote_by_id(web::Path(id): web::Path<u32>) -> impl Responder {
-    let upper = db_uint32_read("select count(*) * 10 from songs");
-    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id));
+async fn net_song_upvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
+    let upper = db_uint32_read("select count(*) * 10 from songs")?;
+    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
     val *= 2;
 
     if val > upper {
@@ -109,88 +116,93 @@ async fn net_song_upvote_by_id(web::Path(id): web::Path<u32>) -> impl Responder 
     }
 
     let i = &format!("Update songs set rating = {} where id = {}", val, id);
-    db_execute(i);
-    "Ok"
+    db_execute(i)?;
+    Ok("Ok".to_string())
 }
 
 #[get("/downvote/{id}")]
-async fn net_song_downvote_by_id(web::Path(id): web::Path<u32>) -> impl Responder {
-    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id));
+async fn net_song_downvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
+    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
     val /= 2;
 
     let i = &format!("Update songs set rating = {} where id = {}", val, id);
-    db_execute(i);
-    "Ok"
+    db_execute(i)?;
+    Ok("Ok".to_string())
 }
 
 #[get("/downvote_mini/{id}")]
-async fn net_song_downvote_mini_by_id(web::Path(id): web::Path<u32>) -> impl Responder {
-    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id));
+async fn net_song_downvote_mini_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
+    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
     val = (val as f64 * 0.66) as u32;
 
     let i = &format!("Update songs set rating = {} where id = {}", val, id);
-    db_execute(i);
-    "Ok"
+    db_execute(i)?;
+    Ok("Ok".to_string())
 }
 
 #[get("/*")]
-async fn net_404() -> impl Responder {
-    "Seite nicht gefunden!"
+async fn net_404() -> Result<String, Error> {
+    Err(ErrorNotFound("No pages here."))
 }
 
-fn get_file_by_name(path: &str) -> NamedFile {
+fn get_file_by_name(path: &str) -> Result<NamedFile, Error> {
     let p = Path::new(path);
-    let file = NamedFile::open(p).expect("file by name error");
-    file.use_last_modified(true)
+
+    let file = NamedFile::open(p)?;
+
+    let filename = p
+        .file_name()
+        .unwrap_or_default()
+        .to_str()
+        .unwrap_or_default();
+
+    Ok(file
+        .use_last_modified(true)
         .set_content_disposition(ContentDisposition {
             disposition: DispositionType::Inline,
-            parameters: vec![DispositionParam::Filename(
-                p.file_name().unwrap().to_str().unwrap().to_string(),
-            )],
-        })
+            parameters: vec![DispositionParam::Filename(filename.to_owned())],
+        }))
 }
 
-fn db_uint32_read(sql: &str) -> u32 {
-    let c = get_db_con();
-    let val: u32 = c
-        .query_row(sql, NO_PARAMS, |row| row.get(0))
-        .expect("db_str_read error");
-    val
+fn db_uint32_read(sql: &str) -> Result<u32, Error> {
+    let c = get_db_con()?;
+    match c.query_row::<u32, _, _>(sql, NO_PARAMS, |row| row.get(0)) {
+        Ok(o) => Ok(o),
+        Err(e) => Err(ErrorInternalServerError(e.to_string())),
+    }
 }
 
-fn db_str_read(sql: &str) -> String {
-    let c = get_db_con();
-    let val: String = c
-        .query_row(sql, NO_PARAMS, |row| row.get(0))
-        .expect("db_str_read error");
-    val
+fn db_str_read(sql: &str) -> Result<String, Error> {
+    let c = get_db_con()?;
+    match c.query_row::<String, _, _>(sql, NO_PARAMS, |row| row.get(0)) {
+        Ok(o) => Ok(o),
+        Err(e) => Err(ErrorInternalServerError(e.to_string())),
+    }
 }
 
-fn db_execute(sql: &str) {
-    let conn = get_db_con();
-    conn.execute(sql, NO_PARAMS).expect("db_execute error");
+fn db_execute(sql: &str) -> Result<(), actix_web::Error> {
+    let conn = get_db_con()?;
+    match conn.execute(sql, NO_PARAMS) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(ErrorInternalServerError(e.to_string())),
+    }
 }
 
-fn db_random_path() -> String {
+fn db_random_path() -> Result<String, Error> {
     db_str_read("SELECT path FROM songs ORDER BY ABS(RANDOM() * rating) desc limit 1")
 }
 
-//fn db_random_id() -> String {
-//    let v = db_int_read("SELECT id FROM songs ORDER BY ABS(RANDOM() * rating) desc limit 1");
-//    return v.to_string();
-//}
-
-fn create_table() -> String {
-    let c = get_db_con();
-    c.execute("DROP TABLE IF EXISTS songs;", NO_PARAMS)
-        .expect("Drop error");
-    c.execute("CREATE TABLE songs (id INTEGER not null primary key autoincrement, path TEXT unique, name TEXT, rating INTEGER, vote INTEGER);",NO_PARAMS)
-        .expect("Table Create error");
-    "Success.".to_string()
+fn create_table() -> Result<String, Error> {
+    db_execute("DROP TABLE IF EXISTS songs;")?;
+    db_execute("CREATE TABLE songs (id INTEGER not null primary key autoincrement, path TEXT unique, name TEXT, rating INTEGER, vote INTEGER);")?;
+    Ok("Success.".to_string())
 }
 
-fn get_db_con() -> Connection {
-    Connection::open("songdb.sqlite").expect("DB Open error")
+fn get_db_con() -> Result<Connection, Error> {
+    match Connection::open("songdb.sqlite") {
+        Ok(o) => Ok(o),
+        Err(e) => Err(ErrorInternalServerError(e.to_string())),
+    }
 }
 
 struct Entry {
@@ -198,27 +210,36 @@ struct Entry {
     id: u16,
 }
 
-fn get_weighted_random_id() -> String {
+fn get_weighted_random_id() -> Result<String, Error> {
     let mut map = BTreeMap::new();
+
     let mut max = 0u32;
 
-    let c = get_db_con();
-    let mut stmt = c
-        .prepare("select rating, id from songs")
-        .expect("db error fetching songs");
-    let rows = stmt
-        .query_map(NO_PARAMS, |row| {
-            Ok(Entry {
-                rating: row.get(0).expect("get rating error"),
-                id: row.get(1).expect("get id error"),
-            })
+    let c = get_db_con()?;
+
+    let mut stmt = match c.prepare("select rating, id from songs") {
+        Ok(o) => Ok(o),
+        Err(e) => Err(ErrorInternalServerError(e.to_string())),
+    }?;
+
+    let row_res = stmt.query_map(NO_PARAMS, |row| {
+        Ok(Entry {
+            rating: row.get(0).expect("get rating error"),
+            id: row.get(1).expect("get id error"),
         })
-        .unwrap();
+    });
+
+    let rows = match row_res {
+        Ok(o) => Ok(o),
+        Err(e) => Err(ErrorInternalServerError(e.to_string())),
+    }?;
 
     // get data from db
-
     for row in rows {
-        let a = row.expect("unwrapping id");
+        let a = match row {
+            Ok(o) => Ok(o),
+            Err(e) => Err(ErrorInternalServerError(e.to_string())),
+        }?;
 
         // put data into map (count), add values
         map.insert(max, a.id);
@@ -230,8 +251,23 @@ fn get_weighted_random_id() -> String {
     let mut rng = thread_rng();
     let random = rng.gen_range(0, max + 1);
 
-    let b = *(map.range(..random).next_back().expect("result error").1);
-    b.to_string()
+    let res = map.range(..random).next_back();
+
+    let final_res;
+
+    match res {
+        None => {
+            let zeroth = map.iter().next();
+            match zeroth {
+                Some(s) => final_res = s,
+                None => return Err(ErrorInternalServerError("Zero-th entry could't be opened!")),
+            };
+        }
+        Some(s) => final_res = s,
+    }
+
+    let c = *final_res.1;
+    Ok(c.to_string())
 
     // https://stackoverflow.com/a/49600137/12591389 :
     //
