@@ -84,7 +84,7 @@ async fn net_reset_and_files() -> Result<String, Error> {
             };
 
             let seconds = get_songlength_secs(&path);
-            let length = format_songlenth(seconds);
+            let length = format_songlength(seconds);
             let rating = GL_RATING_BASE;
             let vote = 0;
 
@@ -234,7 +234,7 @@ fn get_songlength_secs(path: &str) -> u64 {
     duration.as_secs()
 }
 
-fn format_songlenth(seconds: u64) -> String {
+fn format_songlength(seconds: u64) -> String {
     let mins = seconds / 60;
     let secs = seconds % 60;
     if mins >= 60 {
