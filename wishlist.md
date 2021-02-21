@@ -1,0 +1,2 @@
+- Letzte Songs anzeigen zum nachträglichen Bewerten
+- ID anzeigen, link kopieren

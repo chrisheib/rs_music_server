@@ -7,11 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-actix-web = "3"
-actix-files = "0"
-json = "0"
-walkdir = "2"
-rand = "0"
-rusqlite = {version = "0", features = ["bundled"]}
-audiotags = "0" # tags
-mp3-duration = "0" # song length
+actix-web = "3.3"
+actix-files = "0.5"
+json = "0.12"
+walkdir = "2.3"
+rand = "0.8"
+rusqlite = {version = "0.24", features = ["bundled"]}
+audiotags = "0.2" # tags
+mp3-duration = "0.1" # song length
+stable-eyre = "0.2"

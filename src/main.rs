@@ -7,14 +7,25 @@ use actix_web::{
     http::header::DispositionType,
     web, App, Error, HttpServer,
 };
+use db::*;
+use db_layout::*;
 use json::{object, JsonValue};
 use rand::{thread_rng, Rng};
-use rusqlite::{Connection, NO_PARAMS};
+use rusqlite::NO_PARAMS;
 use std::collections::BTreeMap;
 use std::path::Path;
 use walkdir::WalkDir;
 
-const GL_PORT: i16 = 81i16;
+mod db;
+mod db_layout;
+
+//select "updgedootet", count(*), sum(rating), sum(rating)*1.0 / (select sum(rating) from songs) from  songs where rating > 400
+//union
+//select "neutral", count(*), sum(rating), sum(rating)*1.0 / (select sum(rating) from songs) from  songs where rating = 400
+//union
+//select "downgedootet", count(*), sum(rating), sum(rating)*1.0 / (select sum(rating) from songs) from  songs where rating < 400
+
+const GL_PORT: i16 = 82i16;
 const GL_RATING_BASE: u16 = 400u16;
 const GL_DEBUG_SIZE: bool = false;
 
@@ -108,7 +119,7 @@ async fn net_reset_and_files() -> Result<String, Error> {
         println!("{}", size);
     }
 
-    create_table()?;
+    patch_layout()?;
     if !values.is_empty() {
         let statement = &format!(
             "INSERT INTO SONGS (path, filename, songname, artist, album, length, seconds, rating, vote) values {};",
@@ -118,7 +129,7 @@ async fn net_reset_and_files() -> Result<String, Error> {
         std::fs::remove_file("log.txt").unwrap_or_default();
         std::fs::write("log.txt", statement).unwrap_or_default();
 
-        db_execute(statement)?;
+        errconv(db_execute(statement))?;
     }
 
     Ok(result)
@@ -155,38 +166,30 @@ async fn net_songdata_pretty_by_id(web::Path(id): web::Path<u32>) -> Result<Stri
 }
 
 fn get_songdata_json(id: u32) -> Result<JsonValue, Error> {
-    let c = get_db_con()?;
-
-    let mut stmt = match c.prepare("select * from songs where id = ?") {
-        Ok(o) => Ok(o),
-        Err(e) => Err(ErrorInternalServerError(e.to_string())),
-    }?;
-
-    let row_res = stmt.query_row(&[id], |row| -> Result<json::JsonValue, rusqlite::Error> {
-        Ok(object! {
-            id: row.get(0).unwrap_or_else(|_a| 0),
-            path: row.get(1).unwrap_or_else(|_a| "".to_string()),
-            filename: row.get(2).unwrap_or_else(|_a| "".to_string()),
-            songname: row.get(3).unwrap_or_else(|_a| "".to_string()),
-            artist: row.get(4).unwrap_or_else(|_a| "".to_string()),
-            album: row.get(5).unwrap_or_else(|_a| "".to_string()),
-            length: row.get(6).unwrap_or_else(|_a| "".to_string()),
-            seconds: row.get(7).unwrap_or_else(|_a| 0),
-            rating: row.get(8).unwrap_or_else(|_a| 0),
-            vote: row.get(9).unwrap_or_else(|_a| 0),
-        })
-    });
-
-    match row_res {
-        Ok(o) => Ok(o),
-        Err(e) => Err(ErrorInternalServerError(e.to_string())),
-    }
+    adb_select(
+        "select * from songs where id = ?",
+        &[id],
+        |row| -> Result<json::JsonValue, rusqlite::Error> {
+            Ok(object! {
+                id: row.get(0).unwrap_or(0),
+                path: row.get(1).unwrap_or_else(|_a| "".to_string()),
+                filename: row.get(2).unwrap_or_else(|_a| "".to_string()),
+                songname: row.get(3).unwrap_or_else(|_a| "".to_string()),
+                artist: row.get(4).unwrap_or_else(|_a| "".to_string()),
+                album: row.get(5).unwrap_or_else(|_a| "".to_string()),
+                length: row.get(6).unwrap_or_else(|_a| "".to_string()),
+                seconds: row.get(7).unwrap_or(0),
+                rating: row.get(8).unwrap_or(0),
+                vote: row.get(9).unwrap_or(0),
+            })
+        },
+    )
 }
 
 #[get("/upvote/{id}")]
 async fn net_song_upvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
-    let upper = db_uint32_read("select count(*) * 10 from songs")?;
-    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
+    let upper = adb_uint32_read("select count(*) * 10 from songs")?;
+    let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
     val *= 2;
 
     if val > upper {
@@ -194,27 +197,27 @@ async fn net_song_upvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, 
     }
 
     let i = &format!("Update songs set rating = {} where id = {}", val, id);
-    db_execute(i)?;
+    adb_execute(i)?;
     Ok("Ok".to_string())
 }
 
 #[get("/downvote/{id}")]
 async fn net_song_downvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
-    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
+    let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
     val /= 2;
 
     let i = &format!("Update songs set rating = {} where id = {}", val, id);
-    db_execute(i)?;
+    adb_execute(i)?;
     Ok("Ok".to_string())
 }
 
 #[get("/downvote_mini/{id}")]
 async fn net_song_downvote_mini_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
-    let mut val = db_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
+    let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
     val = (val as f64 * 0.66) as u32;
 
     let i = &format!("Update songs set rating = {} where id = {}", val, id);
-    db_execute(i)?;
+    adb_execute(i)?;
     Ok("Ok".to_string())
 }
 
@@ -225,7 +228,7 @@ async fn net_404() -> Result<String, Error> {
 
 fn get_songpath_by_id(id: u32) -> Result<String, Error> {
     let i = &format!("SELECT path FROM songs WHERE id = {}", id);
-    db_str_read(i)
+    adb_str_read(i)
 }
 
 fn get_songlength_secs(path: &str) -> u64 {
@@ -265,60 +268,6 @@ fn get_file_by_name(path: &str) -> Result<NamedFile, Error> {
         }))
 }
 
-fn db_uint32_read(sql: &str) -> Result<u32, Error> {
-    let c = get_db_con()?;
-    match c.query_row::<u32, _, _>(sql, NO_PARAMS, |row| row.get(0)) {
-        Ok(o) => Ok(o),
-        Err(e) => Err(ErrorInternalServerError(e.to_string())),
-    }
-}
-
-fn db_str_read(sql: &str) -> Result<String, Error> {
-    let c = get_db_con()?;
-    match c.query_row::<String, _, _>(sql, NO_PARAMS, |row| row.get(0)) {
-        Ok(o) => Ok(o),
-        Err(e) => Err(ErrorInternalServerError(e.to_string())),
-    }
-}
-
-fn db_execute(sql: &str) -> Result<(), actix_web::Error> {
-    let conn = get_db_con()?;
-    match conn.execute(sql, NO_PARAMS) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(ErrorInternalServerError(e.to_string())),
-    }
-}
-
-//fn db_random_path() -> Result<String, Error> {
-//    db_str_read("SELECT path FROM songs ORDER BY ABS(RANDOM() * rating) desc limit 1")
-//}
-
-fn create_table() -> Result<String, Error> {
-    db_execute("DROP TABLE IF EXISTS songs;")?;
-    db_execute(
-        "CREATE TABLE songs (
-        id INTEGER not null primary key autoincrement,
-        path TEXT unique,
-        filename TEXT,
-        songname TEXT,
-        artist TEXT,
-        album TEXT,
-        length TEXT,
-        seconds INTEGER,
-        rating INTEGER,
-        vote INTEGER
-    );",
-    )?;
-    Ok("Success.".to_string())
-}
-
-fn get_db_con() -> Result<Connection, Error> {
-    match Connection::open("songdb.sqlite") {
-        Ok(o) => Ok(o),
-        Err(e) => Err(ErrorInternalServerError(e.to_string())),
-    }
-}
-
 struct Entry {
     rating: u32,
     id: u16,
@@ -329,7 +278,7 @@ fn get_weighted_random_id() -> Result<String, Error> {
 
     let mut max = 0u32;
 
-    let c = get_db_con()?;
+    let c = adb_con()?;
 
     let mut stmt = match c.prepare("select rating, id from songs") {
         Ok(o) => Ok(o),
@@ -363,7 +312,7 @@ fn get_weighted_random_id() -> Result<String, Error> {
 
     // generate random number 0 .. max
     let mut rng = thread_rng();
-    let random = rng.gen_range(0, max + 1);
+    let random = rng.gen_range(0..max + 1);
 
     let res = map.range(..random).next_back();
 
@@ -387,4 +336,11 @@ fn get_weighted_random_id() -> Result<String, Error> {
     //
     // println!("maximum in map less than {}: {:?}",
     // key, map.range(..key).next_back().unwrap());
+}
+
+pub fn errconv<T>(r: stable_eyre::Result<T>) -> Result<T, Error> {
+    match r {
+        Ok(o) => Ok(o),
+        Err(e) => Err(ErrorInternalServerError(e)),
+    }
 }
