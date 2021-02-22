@@ -25,7 +25,7 @@ mod db_layout;
 //union
 //select "downgedootet", count(*), sum(rating), sum(rating)*1.0 / (select sum(rating) from songs) from  songs where rating < 400
 
-const GL_PORT: i16 = 82i16;
+const GL_PORT: i16 = 81i16;
 const GL_RATING_BASE: u16 = 400u16;
 const GL_DEBUG_SIZE: bool = false;
 
