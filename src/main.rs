@@ -8,16 +8,16 @@ use actix_web::{
     web, App, Error, HttpServer,
 };
 use db::*;
-use db_layout::*;
 use json::{object, JsonValue};
 use rand::{thread_rng, Rng};
 use rusqlite::NO_PARAMS;
 use std::collections::BTreeMap;
 use std::path::Path;
+use update_manager::adb_update;
 use walkdir::WalkDir;
 
 mod db;
-mod db_layout;
+mod update_manager;
 
 //select "updgedootet", count(*), sum(rating), sum(rating)*1.0 / (select sum(rating) from songs) from  songs where rating > 400
 //union
@@ -33,7 +33,7 @@ const GL_DEBUG_SIZE: bool = false;
 async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
         App::new()
-            .service(net_reset_and_files)
+            .service(net_update_files)
             .service(net_get_random_id)
             .service(net_song_random)
             .service(net_song_by_id)
@@ -50,11 +50,13 @@ async fn main() -> std::io::Result<()> {
     .await
 }
 
-#[get("/reset")]
-async fn net_reset_and_files() -> Result<String, Error> {
+#[get("/update")]
+async fn net_update_files() -> Result<String, Error> {
+    adb_update()?;
+
     let mut result: String = "".to_string();
-    let mut values: String = "".to_string();
     let mut size: u64 = 0;
+    let mut values = String::with_capacity(10000 * 300);
 
     let files = WalkDir::new("E:\\Musik\\");
     files
@@ -98,11 +100,12 @@ async fn net_reset_and_files() -> Result<String, Error> {
             let length = format_songlength(seconds);
             let rating = GL_RATING_BASE;
             let vote = 0;
+            let deleted = 0;
 
             result = format!("{}{}\n", result, path);
             // Statement-Values aufbauen
             values = format!(
-                "{}(\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\", {}, {}, {}),",
+                "{}(\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\", {}, {}, {}, {}),",
                 values,
                 path.replace("\"", ""),
                 filename.replace("\"", ""),
@@ -112,24 +115,34 @@ async fn net_reset_and_files() -> Result<String, Error> {
                 length.replace("\"", ""),
                 seconds,
                 rating,
-                vote
+                vote,
+                deleted
             );
         });
     if GL_DEBUG_SIZE {
         println!("{}", size);
     }
 
-    patch_layout()?;
     if !values.is_empty() {
+        adb_execute("UPDATE songs set deleted = 1")?;
+
         let statement = &format!(
-            "INSERT INTO SONGS (path, filename, songname, artist, album, length, seconds, rating, vote) values {};",
+            "INSERT INTO songs (path, filename, songname, artist, album, length, seconds, rating, vote, deleted)
+            VALUES {}
+            ON CONFLICT (path) DO UPDATE SET
+            songname=excluded.songname,
+            artist=excluded.artist,
+            album=excluded.album,
+            length=excluded.length,
+            seconds=excluded.seconds,
+            deleted=excluded.deleted",
             &values[..values.len() - 1]
         );
 
         std::fs::remove_file("log.txt").unwrap_or_default();
         std::fs::write("log.txt", statement).unwrap_or_default();
 
-        errconv(db_execute(statement))?;
+        adb_execute(statement)?;
     }
 
     Ok(result)
@@ -188,7 +201,7 @@ fn get_songdata_json(id: u32) -> Result<JsonValue, Error> {
 
 #[get("/upvote/{id}")]
 async fn net_song_upvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
-    let upper = adb_uint32_read("select count(*) * 10 from songs")?;
+    let upper = adb_uint32_read("select count(*) * 10 from songs where deleted = 0")?;
     let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
     val *= 2;
 
@@ -280,7 +293,7 @@ fn get_weighted_random_id() -> Result<String, Error> {
 
     let c = adb_con()?;
 
-    let mut stmt = match c.prepare("select rating, id from songs") {
+    let mut stmt = match c.prepare("select rating, id from songs where deleted = 0") {
         Ok(o) => Ok(o),
         Err(e) => Err(ErrorInternalServerError(e.to_string())),
     }?;
