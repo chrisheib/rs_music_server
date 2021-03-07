@@ -12,6 +12,7 @@ use json::{object, JsonValue};
 use rand::{thread_rng, Rng};
 use rusqlite::NO_PARAMS;
 use std::collections::BTreeMap;
+use std::ops::Bound::Included;
 use std::path::Path;
 use update_manager::adb_update;
 use walkdir::WalkDir;
@@ -310,50 +311,95 @@ fn get_weighted_random_id() -> Result<String, Error> {
         Err(e) => Err(ErrorInternalServerError(e.to_string())),
     }?;
 
-    // get data from db
     for row in rows {
         let a = match row {
             Ok(o) => Ok(o),
             Err(e) => Err(ErrorInternalServerError(e.to_string())),
         }?;
 
-        // put data into map (count), add values
         map.insert(max, a.id);
-
         max += a.rating;
     }
 
-    // generate random number 0 .. max
-    let mut rng = thread_rng();
-    let random = rng.gen_range(0..max + 1);
-
-    let res = map.range(..random).next_back();
-
-    let final_res;
-
-    match res {
-        None => {
-            let zeroth = map.iter().next();
-            match zeroth {
-                Some(s) => final_res = s,
-                None => return Err(ErrorInternalServerError("Zero-th entry could't be opened!")),
-            };
-        }
-        Some(s) => final_res = s,
-    }
-
-    let c = *final_res.1;
+    let c = rng(&map, max)?;
     Ok(c.to_string())
+}
 
+pub fn rng(map: &BTreeMap<u32, u16>, max: u32) -> Result<u16, Error> {
     // https://stackoverflow.com/a/49600137/12591389 :
     //
     // println!("maximum in map less than {}: {:?}",
     // key, map.range(..key).next_back().unwrap());
+
+    // generate random number 0 .. max
+    let mut rng = thread_rng();
+    let random = rng.gen_range(0..max);
+
+    if let Some(res) = map.range((Included(0), Included(random))).next_back() {
+        Ok(*res.1)
+    } else {
+        Err(ErrorInternalServerError(format!(
+            "Error in random seletion (number: {})",
+            random
+        )))
+    }
 }
 
 pub fn errconv<T>(r: stable_eyre::Result<T>) -> Result<T, Error> {
     match r {
         Ok(o) => Ok(o),
         Err(e) => Err(ErrorInternalServerError(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::collections::HashMap;
+
+    use crate::rng;
+    #[test]
+    fn test_rng() {
+        let map = vec![
+            (0u32, 100u16),
+            (100u32, 200u16),
+            (300u32, 300u16),
+            (600u32, 400u16),
+            (700u32, 500u16),
+            (750u32, 600u16),
+        ];
+        let mut tree = BTreeMap::<u32, u16>::new();
+        let max = 1000u32;
+        map.iter().for_each(|a| {
+            tree.insert(a.0, a.1).unwrap_or(0);
+        });
+
+        println!("{:#?}\n max: {} \n", tree, max);
+
+        let mut hash = HashMap::<u16, usize>::new();
+
+        for _ in 0..1000000 {
+            let out = rng(&tree, max).unwrap_or_default();
+            let val = *hash.get(&out).unwrap_or(&0);
+            hash.insert(out, val + 1);
+        }
+        println!("{:#?}", hash);
+        assert!(*hash.get(&100).unwrap_or(&0) > 95_000);
+        assert!(*hash.get(&100).unwrap_or(&0) < 105_000);
+
+        assert!(*hash.get(&200).unwrap_or(&0) > 195_000);
+        assert!(*hash.get(&200).unwrap_or(&0) < 205_000);
+
+        assert!(*hash.get(&300).unwrap_or(&0) > 295_000);
+        assert!(*hash.get(&300).unwrap_or(&0) < 305_000);
+
+        assert!(*hash.get(&400).unwrap_or(&0) > 95_000);
+        assert!(*hash.get(&400).unwrap_or(&0) < 105_000);
+
+        assert!(*hash.get(&500).unwrap_or(&0) > 45_000);
+        assert!(*hash.get(&500).unwrap_or(&0) < 55_000);
+
+        assert!(*hash.get(&600).unwrap_or(&0) > 245_000);
+        assert!(*hash.get(&600).unwrap_or(&0) < 255_000);
     }
 }
