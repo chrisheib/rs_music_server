@@ -31,7 +31,8 @@ fn update_db() -> Result<()> {
             // config und songs sind vorhanden, normalen updateprozess starten.
             let version = db_str_read("select value from config where key = 'version'")?;
             match version.as_str() {
-                "2" => break,
+                "2" => v2()?,
+                "3" => break,
                 _ => return Err(eyre!("Unbekannte Versionsnummer!")),
             }
         }
@@ -67,4 +68,9 @@ fn v1() -> Result<()> {
     )?;
     db_execute("INSERT INTO config (key, value) values ('version', '2')")?;
     db_execute("ALTER TABLE songs ADD COLUMN deleted INTEGER DEFAULT 0 NOT NULL")
+}
+
+fn v2() -> Result<()> {
+    db_execute("ALTER TABLE songs ADD COLUMN times_played INTEGER DEFAULT 0 NOT NULL")?;
+    db_execute("UPDATE config SET value = '3' WHERE key LIKE 'version'")
 }

@@ -9,10 +9,8 @@ use actix_web::{
 };
 use db::*;
 use json::{object, JsonValue};
-use rand::{thread_rng, Rng};
+use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
 use rusqlite::NO_PARAMS;
-use std::collections::BTreeMap;
-use std::ops::Bound::Included;
 use std::path::Path;
 use update_manager::adb_update;
 use walkdir::WalkDir;
@@ -25,6 +23,9 @@ mod update_manager;
 //select "neutral", count(*), sum(rating), sum(rating)*1.0 / (select sum(rating) from songs) from  songs where rating = 400
 //union
 //select "downgedootet", count(*), sum(rating), sum(rating)*1.0 / (select sum(rating) from songs) from  songs where rating < 400
+
+// Auswertung mit prozentualer Aufschlüsselung:
+// select rating, count(*), count(*) * rating, printf('%.1f', ((sum(rating)*1.0 / (select sum(rating)*1.0 from songs)) * 100.0)) from songs group by rating order by rating desc
 
 const GL_PORT: i16 = 81i16;
 const GL_RATING_BASE: u16 = 400u16;
@@ -156,6 +157,7 @@ async fn net_get_random_id() -> Result<String, Error> {
 
 #[get("/songs/{id}")]
 async fn net_song_by_id(web::Path(id): web::Path<u32>) -> Result<NamedFile, Error> {
+    increase_times_played(id)?;
     let val = get_songpath_by_id(id)?;
     get_file_by_name(&val)
 }
@@ -195,6 +197,7 @@ fn get_songdata_json(id: u32) -> Result<JsonValue, Error> {
                 seconds: row.get(7).unwrap_or(0),
                 rating: row.get(8).unwrap_or(0),
                 vote: row.get(9).unwrap_or(0),
+                times_played: row.get(11).unwrap_or(0)
             })
         },
     )
@@ -251,6 +254,14 @@ fn get_songlength_secs(path: &str) -> u64 {
     duration.as_secs()
 }
 
+fn increase_times_played(id: u32) -> Result<(), Error> {
+    let i = &format!(
+        "Update songs set times_played = times_played + 1 where id = {}",
+        id
+    );
+    adb_execute(i)
+}
+
 fn format_songlength(seconds: u64) -> String {
     let mins = seconds / 60;
     let secs = seconds % 60;
@@ -282,16 +293,7 @@ fn get_file_by_name(path: &str) -> Result<NamedFile, Error> {
         }))
 }
 
-struct Entry {
-    rating: u32,
-    id: u16,
-}
-
 fn get_weighted_random_id() -> Result<String, Error> {
-    let mut map = BTreeMap::new();
-
-    let mut max = 0u32;
-
     let c = adb_con()?;
 
     let mut stmt = match c.prepare("select rating, id from songs where deleted = 0") {
@@ -300,10 +302,10 @@ fn get_weighted_random_id() -> Result<String, Error> {
     }?;
 
     let row_res = stmt.query_map(NO_PARAMS, |row| {
-        Ok(Entry {
-            rating: row.get(0).expect("get rating error"),
-            id: row.get(1).expect("get id error"),
-        })
+        Ok((
+            row.get::<usize, u32>(0).expect("get rating error"),
+            row.get::<usize, u16>(1).expect("get id error"),
+        ))
     });
 
     let rows = match row_res {
@@ -311,37 +313,28 @@ fn get_weighted_random_id() -> Result<String, Error> {
         Err(e) => Err(ErrorInternalServerError(e.to_string())),
     }?;
 
+    let mut map: Vec<(u32, u16)> = Vec::new();
+
     for row in rows {
         let a = match row {
             Ok(o) => Ok(o),
             Err(e) => Err(ErrorInternalServerError(e.to_string())),
         }?;
 
-        map.insert(max, a.id);
-        max += a.rating;
+        map.push(a);
     }
 
-    let c = rng(&map, max)?;
+    let c = rng(&map)?;
     Ok(c.to_string())
 }
 
-pub fn rng(map: &BTreeMap<u32, u16>, max: u32) -> Result<u16, Error> {
-    // https://stackoverflow.com/a/49600137/12591389 :
-    //
-    // println!("maximum in map less than {}: {:?}",
-    // key, map.range(..key).next_back().unwrap());
-
-    // generate random number 0 .. max
-    let mut rng = thread_rng();
-    let random = rng.gen_range(0..max);
-
-    if let Some(res) = map.range((Included(0), Included(random))).next_back() {
-        Ok(*res.1)
+pub fn rng(map: &[(u32, u16)]) -> Result<u16, Error> {
+    if let Ok(res) = WeightedIndex::new(map.iter().map(|item| item.0)) {
+        Ok(map[res.sample(&mut thread_rng())].1)
     } else {
-        Err(ErrorInternalServerError(format!(
-            "Error in random seletion (number: {})",
-            random
-        )))
+        Err(ErrorInternalServerError(
+            "Error in random seletion".to_string(),
+        ))
     }
 }
 
@@ -354,32 +347,24 @@ pub fn errconv<T>(r: stable_eyre::Result<T>) -> Result<T, Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::collections::HashMap;
 
     use crate::rng;
     #[test]
-    fn test_rng() {
+    fn test_vec_rng() {
         let map = vec![
-            (0u32, 100u16),
-            (100u32, 200u16),
+            (100u32, 100u16),
+            (200u32, 200u16),
             (300u32, 300u16),
-            (600u32, 400u16),
-            (700u32, 500u16),
-            (750u32, 600u16),
+            (100u32, 400u16),
+            (50u32, 500u16),
+            (250u32, 600u16),
         ];
-        let mut tree = BTreeMap::<u32, u16>::new();
-        let max = 1000u32;
-        map.iter().for_each(|a| {
-            tree.insert(a.0, a.1).unwrap_or(0);
-        });
-
-        println!("{:#?}\n max: {} \n", tree, max);
 
         let mut hash = HashMap::<u16, usize>::new();
 
         for _ in 0..1000000 {
-            let out = rng(&tree, max).unwrap_or_default();
+            let out = rng(&map).unwrap_or_default();
             let val = *hash.get(&out).unwrap_or(&0);
             hash.insert(out, val + 1);
         }
