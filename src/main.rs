@@ -11,6 +11,7 @@ use db::*;
 use json::{object, JsonValue};
 use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
 use rusqlite::NO_PARAMS;
+use stable_eyre::eyre::Context;
 use std::path::Path;
 use update_manager::adb_update;
 use walkdir::WalkDir;
@@ -28,7 +29,7 @@ mod update_manager;
 // select rating, count(*), count(*) * rating, printf('%.1f', ((sum(rating)*1.0 / (select sum(rating)*1.0 from songs)) * 100.0)) from songs group by rating order by rating desc
 
 const GL_PORT: i16 = 81i16;
-const GL_RATING_BASE: u16 = 400u16;
+const GL_RATING_BASE: u16 = 3u16;
 const GL_DEBUG_SIZE: bool = false;
 
 #[actix_web::main]
@@ -41,7 +42,6 @@ async fn main() -> std::io::Result<()> {
             .service(net_song_by_id)
             .service(net_song_upvote_by_id)
             .service(net_song_downvote_by_id)
-            .service(net_song_downvote_mini_by_id)
             .service(net_songdata_by_id)
             .service(net_songdata_pretty_by_id)
             .service(net_404)
@@ -152,11 +152,13 @@ async fn net_update_files() -> Result<String, Error> {
 
 #[get("/random_id")]
 async fn net_get_random_id() -> Result<String, Error> {
+    adb_update()?;
     get_weighted_random_id()
 }
 
 #[get("/songs/{id}")]
 async fn net_song_by_id(web::Path(id): web::Path<u32>) -> Result<NamedFile, Error> {
+    adb_update()?;
     increase_times_played(id)?;
     let val = get_songpath_by_id(id)?;
     get_file_by_name(&val)
@@ -164,6 +166,7 @@ async fn net_song_by_id(web::Path(id): web::Path<u32>) -> Result<NamedFile, Erro
 
 #[get("/songs/random")]
 async fn net_song_random() -> Result<NamedFile, Error> {
+    adb_update()?;
     let id = get_weighted_random_id()?;
     let path = get_songpath_by_id(id.parse::<u32>().unwrap_or_default())?;
     get_file_by_name(&path)
@@ -171,12 +174,14 @@ async fn net_song_random() -> Result<NamedFile, Error> {
 
 #[get("/songdata/{id}")]
 async fn net_songdata_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
+    adb_update()?;
     let song = get_songdata_json(id)?;
     Ok(song.dump())
 }
 
 #[get("/songdata_pretty/{id}")]
 async fn net_songdata_pretty_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
+    adb_update()?;
     let song = get_songdata_json(id)?;
     Ok(format!("{:#}", song))
 }
@@ -205,37 +210,26 @@ fn get_songdata_json(id: u32) -> Result<JsonValue, Error> {
 
 #[get("/upvote/{id}")]
 async fn net_song_upvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
-    let upper = adb_uint32_read("select count(*) * 10 from songs where deleted = 0")?;
+    adb_update()?;
     let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
-    val *= 2;
-
-    if val > upper {
-        val = upper;
+    if val < 7 {
+        val += 1;
+        let i = &format!("Update songs set rating = {} where id = {}", val, id);
+        adb_execute(i)?;
     }
-
-    let i = &format!("Update songs set rating = {} where id = {}", val, id);
-    adb_execute(i)?;
-    Ok("Ok".to_string())
+    Ok(format!("Upvoted {}. New Score: {}", id, val))
 }
 
 #[get("/downvote/{id}")]
 async fn net_song_downvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
+    adb_update()?;
     let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
-    val /= 2;
-
-    let i = &format!("Update songs set rating = {} where id = {}", val, id);
-    adb_execute(i)?;
-    Ok("Ok".to_string())
-}
-
-#[get("/downvote_mini/{id}")]
-async fn net_song_downvote_mini_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
-    let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
-    val = (val as f64 * 0.66) as u32;
-
-    let i = &format!("Update songs set rating = {} where id = {}", val, id);
-    adb_execute(i)?;
-    Ok("Ok".to_string())
+    if val > 0 {
+        val -= 1;
+        let i = &format!("Update songs set rating = {} where id = {}", val, id);
+        adb_execute(i)?;
+    }
+    Ok(format!("Downvoted {}. New Score: {}", id, val))
 }
 
 #[get("/*")]
@@ -296,32 +290,32 @@ fn get_file_by_name(path: &str) -> Result<NamedFile, Error> {
 fn get_weighted_random_id() -> Result<String, Error> {
     let c = adb_con()?;
 
-    let mut stmt = match c.prepare("select rating, id from songs where deleted = 0") {
-        Ok(o) => Ok(o),
-        Err(e) => Err(ErrorInternalServerError(e.to_string())),
-    }?;
+    let mut stmt = errconv(
+        c.prepare("select rating, id from songs where deleted = 0 and rating > 0")
+            .wrap_err("prepare query"),
+    )?;
 
-    let row_res = stmt.query_map(NO_PARAMS, |row| {
-        Ok((
-            row.get::<usize, u32>(0).expect("get rating error"),
-            row.get::<usize, u16>(1).expect("get id error"),
-        ))
-    });
-
-    let rows = match row_res {
-        Ok(o) => Ok(o),
-        Err(e) => Err(ErrorInternalServerError(e.to_string())),
-    }?;
+    let rows = errconv(
+        stmt.query_map(NO_PARAMS, |row| {
+            Ok((row.get::<usize, u32>(0), row.get::<usize, u16>(1)))
+        })
+        .wrap_err("convert query result"),
+    )?
+    .filter_map(|a| if let Ok(row) = a { Some(row) } else { None });
 
     let mut map: Vec<(u32, u16)> = Vec::new();
 
     for row in rows {
-        let a = match row {
-            Ok(o) => Ok(o),
-            Err(e) => Err(ErrorInternalServerError(e.to_string())),
-        }?;
-
-        map.push(a);
+        if let Ok(a) = row.0 {
+            if let Ok(b) = row.1 {
+                let a = 2u32.pow(a - 1);
+                map.push((a, b));
+            } else {
+                continue;
+            };
+        } else {
+            continue;
+        };
     }
 
     let c = rng(&map)?;

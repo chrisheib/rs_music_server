@@ -32,7 +32,8 @@ fn update_db() -> Result<()> {
             let version = db_str_read("select value from config where key = 'version'")?;
             match version.as_str() {
                 "2" => v2()?,
-                "3" => break,
+                "3" => v3()?,
+                "4" => break,
                 _ => return Err(eyre!("Unbekannte Versionsnummer!")),
             }
         }
@@ -73,4 +74,16 @@ fn v1() -> Result<()> {
 fn v2() -> Result<()> {
     db_execute("ALTER TABLE songs ADD COLUMN times_played INTEGER DEFAULT 0 NOT NULL")?;
     db_execute("UPDATE config SET value = '3' WHERE key LIKE 'version'")
+}
+
+fn v3() -> Result<()> {
+    db_execute("UPDATE songs SET rating = 0 WHERE rating < 100")?;
+    db_execute("UPDATE songs SET rating = 1 WHERE rating = 100")?;
+    db_execute("UPDATE songs SET rating = 2 WHERE rating = 200")?;
+    db_execute("UPDATE songs SET rating = 3 WHERE rating = 400")?;
+    db_execute("UPDATE songs SET rating = 4 WHERE rating = 800")?;
+    db_execute("UPDATE songs SET rating = 5 WHERE rating = 1600")?;
+    db_execute("UPDATE songs SET rating = 6 WHERE rating = 3200")?;
+    db_execute("UPDATE songs SET rating = 7 WHERE rating >= 6400")?;
+    db_execute("UPDATE config SET value = '4' WHERE key LIKE 'version'")
 }
