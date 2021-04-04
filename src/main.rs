@@ -19,15 +19,6 @@ use walkdir::WalkDir;
 mod db;
 mod update_manager;
 
-//select "updgedootet", count(*), sum(rating), sum(rating)*1.0 / (select sum(rating) from songs) from  songs where rating > 400
-//union
-//select "neutral", count(*), sum(rating), sum(rating)*1.0 / (select sum(rating) from songs) from  songs where rating = 400
-//union
-//select "downgedootet", count(*), sum(rating), sum(rating)*1.0 / (select sum(rating) from songs) from  songs where rating < 400
-
-// Auswertung mit prozentualer Aufschlüsselung:
-// select rating, count(*), count(*) * rating, printf('%.1f', ((sum(rating)*1.0 / (select sum(rating)*1.0 from songs)) * 100.0)) from songs group by rating order by rating desc
-
 const GL_PORT: i16 = 81i16;
 const GL_RATING_BASE: u16 = 3u16;
 const GL_DEBUG_SIZE: bool = false;
