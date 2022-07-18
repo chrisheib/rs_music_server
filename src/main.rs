@@ -10,7 +10,6 @@ use actix_web::{
 use db::*;
 use json::{object, JsonValue};
 use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
-use rusqlite::NO_PARAMS;
 use stable_eyre::eyre::Context;
 use std::path::Path;
 use update_manager::adb_update;
@@ -100,12 +99,12 @@ async fn net_update_files() -> Result<String, Error> {
             values = format!(
                 "{}(\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\", {}, {}, {}, {}),",
                 values,
-                path.replace("\"", ""),
-                filename.replace("\"", ""),
-                songname.replace("\"", ""),
-                artist.replace("\"", ""),
-                album.replace("\"", ""),
-                length.replace("\"", ""),
+                path.replace('\"', ""),
+                filename.replace('\"', ""),
+                songname.replace('\"', ""),
+                artist.replace('\"', ""),
+                album.replace('\"', ""),
+                length.replace('\"', ""),
                 seconds,
                 rating,
                 vote,
@@ -148,8 +147,9 @@ async fn net_get_random_id() -> Result<String, Error> {
 }
 
 #[get("/songs/{id}")]
-async fn net_song_by_id(web::Path(id): web::Path<u32>) -> Result<NamedFile, Error> {
+async fn net_song_by_id(id: web::Path<u32>) -> Result<NamedFile, Error> {
     adb_update()?;
+    let id = id.into_inner();
     increase_times_played(id)?;
     let val = get_songpath_by_id(id)?;
     get_file_by_name(&val)
@@ -164,15 +164,17 @@ async fn net_song_random() -> Result<NamedFile, Error> {
 }
 
 #[get("/songdata/{id}")]
-async fn net_songdata_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
+async fn net_songdata_by_id(id: web::Path<u32>) -> Result<String, Error> {
     adb_update()?;
+    let id = id.into_inner();
     let song = get_songdata_json(id)?;
     Ok(song.dump())
 }
 
 #[get("/songdata_pretty/{id}")]
-async fn net_songdata_pretty_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
+async fn net_songdata_pretty_by_id(id: web::Path<u32>) -> Result<String, Error> {
     adb_update()?;
+    let id = id.into_inner();
     let song = get_songdata_json(id)?;
     Ok(format!("{:#}", song))
 }
@@ -180,7 +182,7 @@ async fn net_songdata_pretty_by_id(web::Path(id): web::Path<u32>) -> Result<Stri
 fn get_songdata_json(id: u32) -> Result<JsonValue, Error> {
     adb_select(
         "select * from songs where id = ?",
-        &[id],
+        [id],
         |row| -> Result<json::JsonValue, rusqlite::Error> {
             Ok(object! {
                 id: row.get(0).unwrap_or(0),
@@ -200,8 +202,9 @@ fn get_songdata_json(id: u32) -> Result<JsonValue, Error> {
 }
 
 #[get("/upvote/{id}")]
-async fn net_song_upvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
+async fn net_song_upvote_by_id(id: web::Path<u32>) -> Result<String, Error> {
     adb_update()?;
+    let id = id.into_inner();
     let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
     if val < 7 {
         val += 1;
@@ -212,8 +215,9 @@ async fn net_song_upvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, 
 }
 
 #[get("/downvote/{id}")]
-async fn net_song_downvote_by_id(web::Path(id): web::Path<u32>) -> Result<String, Error> {
+async fn net_song_downvote_by_id(id: web::Path<u32>) -> Result<String, Error> {
     adb_update()?;
+    let id = id.into_inner();
     let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
     if val > 0 {
         val -= 1;
@@ -287,7 +291,7 @@ fn get_weighted_random_id() -> Result<String, Error> {
     )?;
 
     let rows = errconv(
-        stmt.query_map(NO_PARAMS, |row| {
+        stmt.query_map([], |row| {
             Ok((row.get::<usize, u32>(0), row.get::<usize, u16>(1)))
         })
         .wrap_err("convert query result"),
