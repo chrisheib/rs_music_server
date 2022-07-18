@@ -11,13 +11,6 @@
             "preLaunchTask": {
                 "command": "build",
                 "type": "cargo",
-                "problemMatcher": [
-                    "$rustc"
-                ],
-                "group": {
-                    "kind": "build",
-                    "isDefault": true
-                },
                 "label": "Rust: cargo build"
             },
             "program": "target\\debug\\rs_music_server.exe",

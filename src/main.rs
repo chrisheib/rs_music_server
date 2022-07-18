@@ -5,11 +5,12 @@ use actix_web::{
     http::header::ContentDisposition,
     http::header::DispositionParam,
     http::header::DispositionType,
-    web, App, Error, HttpServer,
+    web::{self, Json}, App, Error, HttpServer,
 };
 use db::*;
 use json::{object, JsonValue};
 use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
+use serde::Serialize;
 use stable_eyre::eyre::Context;
 use std::path::Path;
 use update_manager::adb_update;
@@ -27,6 +28,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
         App::new()
             .service(net_update_files)
+            .service(net_songlist)
             .service(net_get_random_id)
             .service(net_song_random)
             .service(net_song_by_id)
@@ -144,6 +146,48 @@ async fn net_update_files() -> Result<String, Error> {
 async fn net_get_random_id() -> Result<String, Error> {
     adb_update()?;
     get_weighted_random_id()
+}
+
+#[derive(Serialize)]
+struct Song {
+    id: i32,
+    path: String,
+    filename: String,
+    songname: String,
+    artist: String,
+    album: String,
+    length: String,
+    seconds: i32,
+    rating: i32,
+    vote: i32
+}
+
+#[get("/songs/")]
+async fn net_songlist() -> Result<web::Json<Vec<Song>>, Error> {
+    adb_update()?;
+    let sql = "select * from songs";
+
+    let c = adb_con()?;
+    let mut stmt = errconv(c.prepare(sql).wrap_err("prepare"))?;
+    let vec = stmt.query_map([], |row| {
+        Ok(Song {
+            id: row.get::<_,i32>(0)?,
+            path: row.get::<_,String>(1)?,
+            filename: row.get::<_,String>(2)?,
+            songname:row.get::<_,String>(3)?,
+            artist:row.get::<_,String>(4)?,
+            album:row.get::<_,String>(5)?,
+            length:row.get::<_,String>(6)?,
+            seconds:row.get::<_,i32>(7)?,
+            rating:row.get::<_,i32>(8)?,
+            vote:row.get::<_,i32>(9)?,
+        })
+    });
+
+    let vec = errconv(vec.wrap_err("convert MappedRows"))?;
+    let vec = errconv(vec.into_iter().collect::<Result<Vec<Song>, _>>().wrap_err("collect Songs"))?;
+
+    Ok(Json(vec))
 }
 
 #[get("/songs/{id}")]

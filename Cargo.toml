@@ -6,6 +6,7 @@ edition = "2021"
 
 [profile.release]
 lto = "thin"
+debug = 1
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -19,3 +20,4 @@ rusqlite = {version = "0.28.0", features = ["bundled"]}
 audiotags = "0.2.7182" # tags
 mp3-duration = "0.1.10" # song length
 stable-eyre = "0.2.2"
+serde = {version = "*", features = ["derive"]}
