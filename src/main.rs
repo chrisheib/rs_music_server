@@ -5,7 +5,8 @@ use actix_web::{
     http::header::ContentDisposition,
     http::header::DispositionParam,
     http::header::DispositionType,
-    web::{self, Json}, App, Error, HttpServer,
+    web::{self, Json},
+    App, Error, HttpServer,
 };
 use db::*;
 use json::{object, JsonValue};
@@ -40,6 +41,7 @@ async fn main() -> std::io::Result<()> {
     })
     .bind(format!(":{}", GL_PORT))?
     .bind(format!("localhost:{}", GL_PORT))?
+    .bind(format!("0.0.0.0:{}", GL_PORT))?
     .run()
     .await
 }
@@ -159,10 +161,10 @@ struct Song {
     length: String,
     seconds: i32,
     rating: i32,
-    vote: i32
+    vote: i32,
 }
 
-#[get("/songs/")]
+#[get("/songs")]
 async fn net_songlist() -> Result<web::Json<Vec<Song>>, Error> {
     adb_update()?;
     let sql = "select * from songs";
@@ -171,21 +173,25 @@ async fn net_songlist() -> Result<web::Json<Vec<Song>>, Error> {
     let mut stmt = errconv(c.prepare(sql).wrap_err("prepare"))?;
     let vec = stmt.query_map([], |row| {
         Ok(Song {
-            id: row.get::<_,i32>(0)?,
-            path: row.get::<_,String>(1)?,
-            filename: row.get::<_,String>(2)?,
-            songname:row.get::<_,String>(3)?,
-            artist:row.get::<_,String>(4)?,
-            album:row.get::<_,String>(5)?,
-            length:row.get::<_,String>(6)?,
-            seconds:row.get::<_,i32>(7)?,
-            rating:row.get::<_,i32>(8)?,
-            vote:row.get::<_,i32>(9)?,
+            id: row.get::<_, i32>(0)?,
+            path: row.get::<_, String>(1)?,
+            filename: row.get::<_, String>(2)?,
+            songname: row.get::<_, String>(3)?,
+            artist: row.get::<_, String>(4)?,
+            album: row.get::<_, String>(5)?,
+            length: row.get::<_, String>(6)?,
+            seconds: row.get::<_, i32>(7)?,
+            rating: row.get::<_, i32>(8)?,
+            vote: row.get::<_, i32>(9)?,
         })
     });
 
     let vec = errconv(vec.wrap_err("convert MappedRows"))?;
-    let vec = errconv(vec.into_iter().collect::<Result<Vec<Song>, _>>().wrap_err("collect Songs"))?;
+    let vec = errconv(
+        vec.into_iter()
+            .collect::<Result<Vec<Song>, _>>()
+            .wrap_err("collect Songs"),
+    )?;
 
     Ok(Json(vec))
 }
