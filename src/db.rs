@@ -25,7 +25,7 @@ where
 pub fn db_uint32_read(sql: &str) -> Result<u32> {
     let c = db_con()?;
     c.query_row::<u32, _, _>(sql, [], |row| row.get(0))
-        .wrap_err(format!("db_uint32_read: {}", sql))
+        .wrap_err(format!("db_uint32_read: {sql}"))
 }
 
 pub fn adb_uint32_read(sql: &str) -> actix_web::Result<u32, Error> {
@@ -35,7 +35,7 @@ pub fn adb_uint32_read(sql: &str) -> actix_web::Result<u32, Error> {
 pub fn db_str_read(sql: &str) -> Result<String> {
     let c = db_con()?;
     c.query_row::<String, _, _>(sql, [], |row| row.get(0))
-        .wrap_err(format!("db_str_read: {}", sql))
+        .wrap_err(format!("db_str_read: {sql}"))
 }
 
 pub fn adb_str_read(sql: &str) -> actix_web::Result<String, Error> {
@@ -45,7 +45,7 @@ pub fn adb_str_read(sql: &str) -> actix_web::Result<String, Error> {
 pub fn db_execute(sql: &str) -> Result<()> {
     let conn = db_con()?;
     conn.execute(sql, [])
-        .wrap_err(format!("db_execute: {}", sql))?;
+        .wrap_err(format!("db_execute: {sql}"))?;
     Ok(())
 }
 
