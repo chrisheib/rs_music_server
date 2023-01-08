@@ -10,19 +10,31 @@ use actix_web::{
 };
 use db::*;
 use json::{object, JsonValue};
+use lazy_static::lazy_static;
 use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
 use serde::Serialize;
-use stable_eyre::eyre::Context;
-use std::path::Path;
+use stable_eyre::eyre::{eyre, Context};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 use update_manager::adb_update;
 use walkdir::WalkDir;
 
 mod db;
 mod update_manager;
 
+type Mylist = Arc<Mutex<Vec<u16>>>;
+
+lazy_static! {
+    static ref LAST_SONGS: Mylist = Arc::new(Mutex::new(Vec::new()));
+}
+
 const GL_PORT: i16 = 81i16;
-const GL_RATING_BASE: u16 = 3u16;
+const GL_RATING_BASE: u16 = 2u16;
+const GL_DEFAULT_RATING_SCALE: f32 = 2.5f32;
 const GL_DEBUG_SIZE: bool = false;
+const GL_REPLAY_PROTECTION: usize = 15;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -31,6 +43,7 @@ async fn main() -> std::io::Result<()> {
             .service(net_update_files)
             .service(net_songlist)
             .service(net_get_random_id)
+            .service(net_get_random_id_with_scale)
             .service(net_song_random)
             .service(net_song_by_id)
             .service(net_song_upvote_by_id)
@@ -38,12 +51,18 @@ async fn main() -> std::io::Result<()> {
             .service(net_songdata_by_id)
             .service(net_songdata_pretty_by_id)
             .service(net_404)
+            .service(net_ping)
     })
-    .bind(format!(":{}", GL_PORT))?
-    .bind(format!("localhost:{}", GL_PORT))?
-    .bind(format!("0.0.0.0:{}", GL_PORT))?
+    .bind(format!(":{GL_PORT}"))?
+    .bind(format!("localhost:{GL_PORT}"))?
+    .bind(format!("0.0.0.0:{GL_PORT}"))?
     .run()
     .await
+}
+
+#[get("/ping")]
+async fn net_ping() -> Result<String, Error> {
+    Ok("pong".to_string())
 }
 
 #[get("/update")]
@@ -98,7 +117,7 @@ async fn net_update_files() -> Result<String, Error> {
             let vote = 0;
             let deleted = 0;
 
-            result = format!("{}{}\n", result, path);
+            result = format!("{result}{path}\n");
             // Statement-Values aufbauen
             values = format!(
                 "{}(\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\", {}, {}, {}, {}),",
@@ -116,7 +135,7 @@ async fn net_update_files() -> Result<String, Error> {
             );
         });
     if GL_DEBUG_SIZE {
-        println!("{}", size);
+        println!("{size}");
     }
 
     if !values.is_empty() {
@@ -144,10 +163,16 @@ async fn net_update_files() -> Result<String, Error> {
     Ok(result)
 }
 
+#[get("/random_id/{scale}")]
+async fn net_get_random_id_with_scale(scale: web::Path<f32>) -> Result<String, Error> {
+    adb_update()?;
+    get_weighted_random_id(*scale)
+}
+
 #[get("/random_id")]
 async fn net_get_random_id() -> Result<String, Error> {
     adb_update()?;
-    get_weighted_random_id()
+    get_weighted_random_id(GL_DEFAULT_RATING_SCALE)
 }
 
 #[derive(Serialize)]
@@ -208,7 +233,7 @@ async fn net_song_by_id(id: web::Path<u32>) -> Result<NamedFile, Error> {
 #[get("/songs/random")]
 async fn net_song_random() -> Result<NamedFile, Error> {
     adb_update()?;
-    let id = get_weighted_random_id()?;
+    let id = get_weighted_random_id(GL_DEFAULT_RATING_SCALE)?;
     let path = get_songpath_by_id(id.parse::<u32>().unwrap_or_default())?;
     get_file_by_name(&path)
 }
@@ -226,7 +251,7 @@ async fn net_songdata_pretty_by_id(id: web::Path<u32>) -> Result<String, Error> 
     adb_update()?;
     let id = id.into_inner();
     let song = get_songdata_json(id)?;
-    Ok(format!("{:#}", song))
+    Ok(format!("{song:#}"))
 }
 
 fn get_songdata_json(id: u32) -> Result<JsonValue, Error> {
@@ -255,26 +280,26 @@ fn get_songdata_json(id: u32) -> Result<JsonValue, Error> {
 async fn net_song_upvote_by_id(id: web::Path<u32>) -> Result<String, Error> {
     adb_update()?;
     let id = id.into_inner();
-    let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
+    let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {id}"))?;
     if val < 7 {
         val += 1;
-        let i = &format!("Update songs set rating = {} where id = {}", val, id);
+        let i = &format!("Update songs set rating = {val} where id = {id}");
         adb_execute(i)?;
     }
-    Ok(format!("Upvoted {}. New Score: {}", id, val))
+    Ok(format!("Upvoted {id}. New Score: {val}"))
 }
 
 #[get("/downvote/{id}")]
 async fn net_song_downvote_by_id(id: web::Path<u32>) -> Result<String, Error> {
     adb_update()?;
     let id = id.into_inner();
-    let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {}", id))?;
+    let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {id}"))?;
     if val > 0 {
         val -= 1;
-        let i = &format!("Update songs set rating = {} where id = {}", val, id);
+        let i = &format!("Update songs set rating = {val} where id = {id}");
         adb_execute(i)?;
     }
-    Ok(format!("Downvoted {}. New Score: {}", id, val))
+    Ok(format!("Downvoted {id}. New Score: {val}"))
 }
 
 #[get("/*")]
@@ -283,21 +308,18 @@ async fn net_404() -> Result<String, Error> {
 }
 
 fn get_songpath_by_id(id: u32) -> Result<String, Error> {
-    let i = &format!("SELECT path FROM songs WHERE id = {}", id);
+    let i = &format!("SELECT path FROM songs WHERE id = {id}");
     adb_str_read(i)
 }
 
 fn get_songlength_secs(path: &str) -> u64 {
     let path = Path::new(path);
-    let duration = mp3_duration::from_path(&path).unwrap_or_default();
+    let duration = mp3_duration::from_path(path).unwrap_or_default();
     duration.as_secs()
 }
 
 fn increase_times_played(id: u32) -> Result<(), Error> {
-    let i = &format!(
-        "Update songs set times_played = times_played + 1 where id = {}",
-        id
-    );
+    let i = &format!("Update songs set times_played = times_played + 1 where id = {id}");
     adb_execute(i)
 }
 
@@ -307,9 +329,9 @@ fn format_songlength(seconds: u64) -> String {
     if mins >= 60 {
         let hours = mins / 60;
         let mins = mins / 60;
-        format!("{}:{:0>2}:{:0>2}", hours, mins, secs)
+        format!("{hours}:{mins:0>2}:{secs:0>2}")
     } else {
-        format!("{:0>1}:{:0>2}", mins, secs)
+        format!("{mins:0>1}:{secs:0>2}")
     }
 }
 
@@ -332,7 +354,7 @@ fn get_file_by_name(path: &str) -> Result<NamedFile, Error> {
         }))
 }
 
-fn get_weighted_random_id() -> Result<String, Error> {
+fn get_weighted_random_id(scale: f32) -> Result<String, Error> {
     let c = adb_con()?;
 
     let mut stmt = errconv(
@@ -353,7 +375,7 @@ fn get_weighted_random_id() -> Result<String, Error> {
     for row in rows {
         if let Ok(a) = row.0 {
             if let Ok(b) = row.1 {
-                let a = 2u32.pow(a - 1);
+                let a = scale.powi((a - 1) as i32).round() as u32;
                 map.push((a, b));
             } else {
                 continue;
@@ -363,7 +385,29 @@ fn get_weighted_random_id() -> Result<String, Error> {
         };
     }
 
-    let c = rng(&map)?;
+    let mut c: u16;
+
+    let lasts = LAST_SONGS.clone();
+    let Ok(mut inner) = lasts.lock() else {
+        errconv(Err(eyre!("Could not acquire mutex!")))?;
+        unreachable!();
+    };
+    // println!("{inner:#?}");
+    loop {
+        c = rng(&map)?;
+
+        if !inner.contains(&c) {
+            if inner.len() >= GL_REPLAY_PROTECTION {
+                inner.remove(0);
+            }
+            inner.push(c);
+            break;
+        } else {
+            println!("{c} ist schon in der Liste!");
+        }
+    }
+    drop(inner);
+
     Ok(c.to_string())
 }
 
@@ -407,7 +451,7 @@ mod tests {
             let val = *hash.get(&out).unwrap_or(&0);
             hash.insert(out, val + 1);
         }
-        println!("{:#?}", hash);
+        println!("{hash:#?}");
         assert!(*hash.get(&100).unwrap_or(&0) > 95_000);
         assert!(*hash.get(&100).unwrap_or(&0) < 105_000);
 
