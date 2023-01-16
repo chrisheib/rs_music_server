@@ -1,12 +1,12 @@
 use actix_files::NamedFile;
 use actix_web::{
-    error::{ErrorInternalServerError, ErrorNotFound},
+    error::ErrorNotFound,
     get,
     http::header::ContentDisposition,
     http::header::DispositionParam,
     http::header::DispositionType,
     web::{self, Json},
-    App, Error, HttpServer,
+    App, HttpServer,
 };
 use db::*;
 use json::{object, JsonValue};
@@ -14,30 +14,40 @@ use lazy_static::lazy_static;
 use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
 use serde::Serialize;
 use stable_eyre::eyre::{eyre, Context};
+use std::env;
 use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
-use update_manager::adb_update;
 use walkdir::WalkDir;
+
+use crate::update_manager::db_update;
 
 mod db;
 mod update_manager;
 
-type Mylist = Arc<Mutex<Vec<u16>>>;
+type MyRes<T> = Result<T, Box<dyn std::error::Error>>;
+
+type Mylist = Arc<Mutex<Vec<i32>>>;
 
 lazy_static! {
     static ref LAST_SONGS: Mylist = Arc::new(Mutex::new(Vec::new()));
+    static ref GL_PORT: i16 = env::var("PORT")
+        .map(|v| v.parse::<i16>().unwrap_or(3000))
+        .unwrap_or(3000);
+    static ref GL_MUSICDIR: String = env::var("MUSICDIR").unwrap_or("E:\\Musik\\".to_string());
 }
 
-const GL_PORT: i16 = 81i16;
-const GL_RATING_BASE: u16 = 2u16;
+const GL_RATING_BASE: i32 = 2i32;
 const GL_DEFAULT_RATING_SCALE: f32 = 2.5f32;
 const GL_DEBUG_SIZE: bool = false;
 const GL_REPLAY_PROTECTION: usize = 15;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    println!("main");
+    println!("Port: {}", *GL_PORT);
+
     HttpServer::new(|| {
         App::new()
             .service(net_update_files)
@@ -53,27 +63,47 @@ async fn main() -> std::io::Result<()> {
             .service(net_404)
             .service(net_ping)
     })
-    .bind(format!(":{GL_PORT}"))?
-    .bind(format!("localhost:{GL_PORT}"))?
-    .bind(format!("0.0.0.0:{GL_PORT}"))?
+    // .bind(format!(":{}", *GL_PORT))?
+    // .bind(format!("localhost:{}", *GL_PORT))?
+    .bind(format!("0.0.0.0:{}", *GL_PORT))?
     .run()
     .await
 }
 
 #[get("/ping")]
-async fn net_ping() -> Result<String, Error> {
+async fn net_ping() -> MyRes<String> {
+    println!("net_ping");
     Ok("pong".to_string())
 }
 
 #[get("/update")]
-async fn net_update_files() -> Result<String, Error> {
-    adb_update()?;
+async fn net_update_files() -> MyRes<String> {
+    println!("net_update_files");
+    db_update()?;
 
-    let mut result: String = "".to_string();
     let mut size: u64 = 0;
-    let mut values = String::with_capacity(10000 * 300);
+    let mut count = 0;
 
-    let files = WalkDir::new("E:\\Musik\\");
+    let statement =
+            "INSERT INTO songs (path, filename, songname, artist, album, length, seconds, rating, vote, deleted)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (path) DO UPDATE SET
+            songname=excluded.songname,
+            artist=excluded.artist,
+            album=excluded.album,
+            length=excluded.length,
+            seconds=excluded.seconds,
+            deleted=excluded.deleted";
+
+    let mut db = db_con()?;
+
+    let b = db.transaction().wrap_err("transaction")?;
+
+    b.execute("UPDATE songs set deleted = 1", [])
+        .context("delete")?;
+    let mut s = b.prepare(statement).context("prepare")?;
+
+    let files = WalkDir::new(&*GL_MUSICDIR);
     files
         .into_iter()
         .filter_map(Result::ok)
@@ -117,61 +147,40 @@ async fn net_update_files() -> Result<String, Error> {
             let vote = 0;
             let deleted = 0;
 
-            result = format!("{result}{path}\n");
+            // result = format!("{result}{path}\n");
             // Statement-Values aufbauen
-            values = format!(
-                "{}(\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\", {}, {}, {}, {}),",
-                values,
-                path.replace('\"', ""),
-                filename.replace('\"', ""),
-                songname.replace('\"', ""),
-                artist.replace('\"', ""),
-                album.replace('\"', ""),
-                length.replace('\"', ""),
-                seconds,
-                rating,
-                vote,
-                deleted
+            let values = (
+                path, filename, songname, artist, album, length, seconds, rating, vote, deleted,
             );
+
+            s.execute(values).unwrap();
+
+            count += 1;
+            if count % 1000 == 0 {
+                println!("net_update_files count: {count}");
+            }
         });
     if GL_DEBUG_SIZE {
         println!("{size}");
     }
 
-    if !values.is_empty() {
-        adb_execute("UPDATE songs set deleted = 1")?;
+    drop(s);
+    b.commit().wrap_err("commit")?;
 
-        let statement = &format!(
-            "INSERT INTO songs (path, filename, songname, artist, album, length, seconds, rating, vote, deleted)
-            VALUES {}
-            ON CONFLICT (path) DO UPDATE SET
-            songname=excluded.songname,
-            artist=excluded.artist,
-            album=excluded.album,
-            length=excluded.length,
-            seconds=excluded.seconds,
-            deleted=excluded.deleted",
-            &values[..values.len() - 1]
-        );
-
-        std::fs::remove_file("log.txt").unwrap_or_default();
-        std::fs::write("log.txt", statement).unwrap_or_default();
-
-        adb_execute(statement)?;
-    }
-
-    Ok(result)
+    Ok("Ok".to_string())
 }
 
 #[get("/random_id/{scale}")]
-async fn net_get_random_id_with_scale(scale: web::Path<f32>) -> Result<String, Error> {
-    adb_update()?;
+async fn net_get_random_id_with_scale(scale: web::Path<f32>) -> MyRes<String> {
+    println!("net_get_random_id_with_scale({scale})");
+    db_update()?;
     get_weighted_random_id(*scale)
 }
 
 #[get("/random_id")]
-async fn net_get_random_id() -> Result<String, Error> {
-    adb_update()?;
+async fn net_get_random_id() -> MyRes<String> {
+    println!("net_get_random_id");
+    db_update()?;
     get_weighted_random_id(GL_DEFAULT_RATING_SCALE)
 }
 
@@ -190,12 +199,13 @@ struct Song {
 }
 
 #[get("/songs")]
-async fn net_songlist() -> Result<web::Json<Vec<Song>>, Error> {
-    adb_update()?;
+async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
+    println!("net_songlist");
+    db_update()?;
     let sql = "select * from songs";
 
-    let c = adb_con()?;
-    let mut stmt = errconv(c.prepare(sql).wrap_err("prepare"))?;
+    let c = db_con()?;
+    let mut stmt = c.prepare(sql).wrap_err("prepare")?;
     let vec = stmt.query_map([], |row| {
         Ok(Song {
             id: row.get::<_, i32>(0)?,
@@ -211,19 +221,15 @@ async fn net_songlist() -> Result<web::Json<Vec<Song>>, Error> {
         })
     });
 
-    let vec = errconv(vec.wrap_err("convert MappedRows"))?;
-    let vec = errconv(
-        vec.into_iter()
-            .collect::<Result<Vec<Song>, _>>()
-            .wrap_err("collect Songs"),
-    )?;
+    let vec = vec?.into_iter().collect::<Result<Vec<_>, _>>()?;
 
     Ok(Json(vec))
 }
 
 #[get("/songs/{id}")]
-async fn net_song_by_id(id: web::Path<u32>) -> Result<NamedFile, Error> {
-    adb_update()?;
+async fn net_song_by_id(id: web::Path<u32>) -> MyRes<NamedFile> {
+    println!("net_song_by_id({id})");
+    db_update()?;
     let id = id.into_inner();
     increase_times_played(id)?;
     let val = get_songpath_by_id(id)?;
@@ -231,31 +237,35 @@ async fn net_song_by_id(id: web::Path<u32>) -> Result<NamedFile, Error> {
 }
 
 #[get("/songs/random")]
-async fn net_song_random() -> Result<NamedFile, Error> {
-    adb_update()?;
+async fn net_song_random() -> MyRes<NamedFile> {
+    println!("net_song_random");
+    db_update()?;
     let id = get_weighted_random_id(GL_DEFAULT_RATING_SCALE)?;
     let path = get_songpath_by_id(id.parse::<u32>().unwrap_or_default())?;
     get_file_by_name(&path)
 }
 
 #[get("/songdata/{id}")]
-async fn net_songdata_by_id(id: web::Path<u32>) -> Result<String, Error> {
-    adb_update()?;
+async fn net_songdata_by_id(id: web::Path<u32>) -> MyRes<String> {
+    println!("net_songdata_by_id({id})");
+    db_update()?;
     let id = id.into_inner();
     let song = get_songdata_json(id)?;
     Ok(song.dump())
 }
 
 #[get("/songdata_pretty/{id}")]
-async fn net_songdata_pretty_by_id(id: web::Path<u32>) -> Result<String, Error> {
-    adb_update()?;
+async fn net_songdata_pretty_by_id(id: web::Path<u32>) -> MyRes<String> {
+    println!("net_songdata_pretty_by_id({id})");
+    db_update()?;
     let id = id.into_inner();
     let song = get_songdata_json(id)?;
     Ok(format!("{song:#}"))
 }
 
-fn get_songdata_json(id: u32) -> Result<JsonValue, Error> {
-    adb_select(
+fn get_songdata_json(id: u32) -> MyRes<JsonValue> {
+    println!("get_songdata_json");
+    db_select(
         "select * from songs where id = ?",
         [id],
         |row| -> Result<json::JsonValue, rusqlite::Error> {
@@ -277,39 +287,43 @@ fn get_songdata_json(id: u32) -> Result<JsonValue, Error> {
 }
 
 #[get("/upvote/{id}")]
-async fn net_song_upvote_by_id(id: web::Path<u32>) -> Result<String, Error> {
-    adb_update()?;
+async fn net_song_upvote_by_id(id: web::Path<u32>) -> MyRes<String> {
+    println!("net_song_upvote_by_id({id})");
+    db_update()?;
     let id = id.into_inner();
     let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {id}"))?;
     if val < 7 {
         val += 1;
         let i = &format!("Update songs set rating = {val} where id = {id}");
-        adb_execute(i)?;
+        db_execute(i)?;
     }
     Ok(format!("Upvoted {id}. New Score: {val}"))
 }
 
 #[get("/downvote/{id}")]
-async fn net_song_downvote_by_id(id: web::Path<u32>) -> Result<String, Error> {
-    adb_update()?;
+async fn net_song_downvote_by_id(id: web::Path<u32>) -> MyRes<String> {
+    println!("net_song_downvote_by_id({id})");
+    db_update()?;
     let id = id.into_inner();
     let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {id}"))?;
     if val > 0 {
         val -= 1;
         let i = &format!("Update songs set rating = {val} where id = {id}");
-        adb_execute(i)?;
+        db_execute(i)?;
     }
     Ok(format!("Downvoted {id}. New Score: {val}"))
 }
 
 #[get("/*")]
-async fn net_404() -> Result<String, Error> {
-    Err(ErrorNotFound("No pages here."))
+async fn net_404() -> MyRes<String> {
+    println!("net_404");
+    Err(ErrorNotFound("No pages here.").into())
 }
 
-fn get_songpath_by_id(id: u32) -> Result<String, Error> {
+fn get_songpath_by_id(id: u32) -> MyRes<String> {
+    println!("get_songpath_by_id({id})");
     let i = &format!("SELECT path FROM songs WHERE id = {id}");
-    adb_str_read(i)
+    db_str_read(i)
 }
 
 fn get_songlength_secs(path: &str) -> u64 {
@@ -318,9 +332,10 @@ fn get_songlength_secs(path: &str) -> u64 {
     duration.as_secs()
 }
 
-fn increase_times_played(id: u32) -> Result<(), Error> {
+fn increase_times_played(id: u32) -> MyRes<()> {
+    println!("increase_times_played({id})");
     let i = &format!("Update songs set times_played = times_played + 1 where id = {id}");
-    adb_execute(i)
+    db_execute(i)
 }
 
 fn format_songlength(seconds: u64) -> String {
@@ -335,7 +350,8 @@ fn format_songlength(seconds: u64) -> String {
     }
 }
 
-fn get_file_by_name(path: &str) -> Result<NamedFile, Error> {
+fn get_file_by_name(path: &str) -> MyRes<NamedFile> {
+    println!("get_file_by_name");
     let p = Path::new(path);
 
     let file = NamedFile::open(p)?;
@@ -354,45 +370,33 @@ fn get_file_by_name(path: &str) -> Result<NamedFile, Error> {
         }))
 }
 
-fn get_weighted_random_id(scale: f32) -> Result<String, Error> {
-    let c = adb_con()?;
+fn get_weighted_random_id(scale: f32) -> MyRes<String> {
+    println!("get_weighted_random_id");
+    let c = db_con()?;
 
-    let mut stmt = errconv(
-        c.prepare("select rating, id from songs where deleted = 0 and rating > 0")
-            .wrap_err("prepare query"),
-    )?;
+    let mut stmt = c.prepare("select rating, id from songs where deleted = 0 and rating > 0")?;
 
-    let rows = errconv(
-        stmt.query_map([], |row| {
-            Ok((row.get::<usize, u32>(0), row.get::<usize, u16>(1)))
+    let rows = stmt.query_map([], |row| -> Result<(u32, i32), rusqlite::Error> {
+        Ok((row.get::<usize, u32>(0)?, row.get::<usize, i32>(1)?))
+    })?;
+
+    let map = rows
+        .into_iter()
+        .collect::<Result<Vec<(u32, i32)>, _>>()?
+        .into_iter()
+        .map(|a| {
+            let rating = scale.powi((a.0 - 1) as i32).round() as u32;
+            (rating, a.1)
         })
-        .wrap_err("convert query result"),
-    )?
-    .filter_map(|a| if let Ok(row) = a { Some(row) } else { None });
+        .collect::<Vec<(u32, i32)>>();
 
-    let mut map: Vec<(u32, u16)> = Vec::new();
-
-    for row in rows {
-        if let Ok(a) = row.0 {
-            if let Ok(b) = row.1 {
-                let a = scale.powi((a - 1) as i32).round() as u32;
-                map.push((a, b));
-            } else {
-                continue;
-            };
-        } else {
-            continue;
-        };
-    }
-
-    let mut c: u16;
+    let mut c: i32;
 
     let lasts = LAST_SONGS.clone();
     let Ok(mut inner) = lasts.lock() else {
-        errconv(Err(eyre!("Could not acquire mutex!")))?;
+        Err(eyre!("Could not acquire mutex!"))?;
         unreachable!();
     };
-    // println!("{inner:#?}");
     loop {
         c = rng(&map)?;
 
@@ -411,21 +415,14 @@ fn get_weighted_random_id(scale: f32) -> Result<String, Error> {
     Ok(c.to_string())
 }
 
-pub fn rng(map: &[(u32, u16)]) -> Result<u16, Error> {
-    if let Ok(res) = WeightedIndex::new(map.iter().map(|item| item.0)) {
-        Ok(map[res.sample(&mut thread_rng())].1)
-    } else {
-        Err(ErrorInternalServerError(
-            "Error in random seletion".to_string(),
-        ))
-    }
-}
+pub fn rng(map: &[(u32, i32)]) -> MyRes<i32> {
+    // println!("rng");
+    let res = WeightedIndex::new(map.iter().map(|item| item.0))?;
+    let index = res.sample(&mut thread_rng());
+    let id = map[index].1;
 
-pub fn errconv<T>(r: stable_eyre::Result<T>) -> Result<T, Error> {
-    match r {
-        Ok(o) => Ok(o),
-        Err(e) => Err(ErrorInternalServerError(e)),
-    }
+    // println!("rng return: len {}, index: {index}, id: {id}", map.len());
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -435,18 +432,22 @@ mod tests {
     use crate::rng;
     #[test]
     fn test_vec_rng() {
+        println!("test_vec_rng");
         let map = vec![
-            (100u32, 100u16),
-            (200u32, 200u16),
-            (300u32, 300u16),
-            (100u32, 400u16),
-            (50u32, 500u16),
-            (250u32, 600u16),
+            (100u32, 100i32),
+            (200u32, 200i32),
+            (300u32, 300i32),
+            (100u32, 400i32),
+            (50u32, 500i32),
+            (250u32, 600i32),
+            (100u32, i32::MAX),
+            (100u32, i32::MIN),
+            (100u32, 0),
         ];
 
-        let mut hash = HashMap::<u16, usize>::new();
+        let mut hash = HashMap::<i32, usize>::new();
 
-        for _ in 0..1000000 {
+        for _ in 0..1300000 {
             let out = rng(&map).unwrap_or_default();
             let val = *hash.get(&out).unwrap_or(&0);
             hash.insert(out, val + 1);
@@ -463,6 +464,15 @@ mod tests {
 
         assert!(*hash.get(&400).unwrap_or(&0) > 95_000);
         assert!(*hash.get(&400).unwrap_or(&0) < 105_000);
+
+        assert!(*hash.get(&i32::MAX).unwrap_or(&0) > 95_000);
+        assert!(*hash.get(&i32::MAX).unwrap_or(&0) < 105_000);
+
+        assert!(*hash.get(&i32::MIN).unwrap_or(&0) > 95_000);
+        assert!(*hash.get(&i32::MIN).unwrap_or(&0) < 105_000);
+
+        assert!(*hash.get(&0).unwrap_or(&0) > 95_000);
+        assert!(*hash.get(&0).unwrap_or(&0) < 105_000);
 
         assert!(*hash.get(&500).unwrap_or(&0) > 45_000);
         assert!(*hash.get(&500).unwrap_or(&0) < 55_000);

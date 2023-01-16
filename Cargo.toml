@@ -1,5 +1,5 @@
 [package]
-name = "rs_music_server"
+name = "music-srv"
 version = "0.1.0"
 authors = ["STSchiff <chrisheib@gmx.de>"]
 edition = "2021"
@@ -16,9 +16,9 @@ actix-files = "0.6"
 json = "0.12"
 walkdir = "2"
 rand = "0.8"
-rusqlite = {version = "0.28", features = ["bundled"]}
-audiotags = "0.4" # tags
-mp3-duration = "0.1" # song length
+rusqlite = { version = "0.28", features = ["bundled"] }
+audiotags = "0.4"                                       # tags
+mp3-duration = "0.1"                                    # song length
 stable-eyre = "0.2"
-serde = {version = "1", features = ["derive"]}
+serde = { version = "1", features = ["derive"] }
 lazy_static = "1"

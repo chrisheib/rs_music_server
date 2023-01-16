@@ -1,15 +1,10 @@
 use crate::{
     db::{db_execute, db_str_read, db_uint32_read},
-    errconv,
+    MyRes,
 };
-use actix_web::Error;
-use stable_eyre::{eyre::eyre, Result};
+use stable_eyre::eyre::eyre;
 
-pub fn adb_update() -> actix_web::Result<(), Error> {
-    errconv(update_db())
-}
-
-fn update_db() -> Result<()> {
+pub fn db_update() -> MyRes<()> {
     loop {
         let table_exists = db_uint32_read(
             "SELECT count(name) FROM sqlite_master WHERE type='table' AND name='config'",
@@ -34,7 +29,7 @@ fn update_db() -> Result<()> {
                 "2" => v2()?,
                 "3" => v3()?,
                 "4" => break,
-                _ => return Err(eyre!("Unbekannte Versionsnummer!")),
+                _ => Err(eyre!("Unbekannte Versionsnummer!"))?,
             }
         }
     }
@@ -42,7 +37,7 @@ fn update_db() -> Result<()> {
     Ok(())
 }
 
-fn v0() -> Result<()> {
+fn v0() -> MyRes<()> {
     db_execute("DROP TABLE IF EXISTS songs;")?;
     db_execute(
         "CREATE TABLE songs (
@@ -60,7 +55,7 @@ fn v0() -> Result<()> {
     )
 }
 
-fn v1() -> Result<()> {
+fn v1() -> MyRes<()> {
     db_execute(
         "CREATE TABLE config (
         key TEXT unique primary key,
@@ -71,12 +66,12 @@ fn v1() -> Result<()> {
     db_execute("ALTER TABLE songs ADD COLUMN deleted INTEGER DEFAULT 0 NOT NULL")
 }
 
-fn v2() -> Result<()> {
+fn v2() -> MyRes<()> {
     db_execute("ALTER TABLE songs ADD COLUMN times_played INTEGER DEFAULT 0 NOT NULL")?;
     db_execute("UPDATE config SET value = '3' WHERE key LIKE 'version'")
 }
 
-fn v3() -> Result<()> {
+fn v3() -> MyRes<()> {
     db_execute("UPDATE songs SET rating = 0 WHERE rating < 100")?;
     db_execute("UPDATE songs SET rating = 1 WHERE rating = 100")?;
     db_execute("UPDATE songs SET rating = 2 WHERE rating = 200")?;
