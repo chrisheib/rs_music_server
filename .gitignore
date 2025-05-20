@@ -1,6 +1,9 @@
 /target
 *.sqlite*
 /*.txt
+music/upload/*
+!music/upload/.gitkeep
+
 # Devenv
 .devenv*
 devenv.local.nix

@@ -1,23 +1,26 @@
 use actix_files::NamedFile;
+use actix_multipart::Multipart;
 use actix_web::{
     error::ErrorNotFound,
     get,
     http::header::{ContentDisposition, DispositionParam, DispositionType},
+    post,
     web::{self, Data, Json},
     App, HttpResponse, HttpServer,
 };
 use color_eyre::eyre::{eyre, Context};
 use color_eyre::{install, Result};
 use db::*;
-use itertools::Itertools;
+use futures_util::StreamExt;
 use json::{object, JsonValue};
 use lazy_static::lazy_static;
-use minijinja::Environment;
-use minijinja::{context, path_loader, Value};
+use minijinja::{context, Environment};
+use minijinja::{path_loader, Value};
 use minijinja_autoreload::AutoReloader;
 use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
+use rusqlite::Statement;
 use serde::Serialize;
-use std::{env, path::PathBuf};
+use std::{env, fs::File, io::Write, path::PathBuf};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -46,7 +49,20 @@ lazy_static! {
     static ref GL_DBDIR: PathBuf = env::var("DBDIR").and_then(|s| Ok(PathBuf::from(s))).unwrap_or(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     );
+    static ref GL_UPLOADDIR: PathBuf = env::var("UPLOADDIR").and_then(|s| Ok(PathBuf::from(s))).unwrap_or(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("music").join("upload")
+    );
 }
+
+const GL_INSERT_SONG_STMT: &str = "INSERT INTO songs (path, filename, songname, artist, album, length, seconds, rating, vote, deleted)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (path) DO UPDATE SET
+            songname=excluded.songname,
+            artist=excluded.artist,
+            album=excluded.album,
+            length=excluded.length,
+            seconds=excluded.seconds,
+            deleted=excluded.deleted";
 
 const GL_RATING_BASE: i32 = 2i32;
 const GL_DEFAULT_RATING_SCALE: f32 = 2.5f32;
@@ -99,6 +115,7 @@ async fn main() -> std::io::Result<()> {
             .service(net_ping)
             .service(net_index)
             .service(net_songlist_web)
+            .service(net_upload)
             .app_data(ext.clone())
     })
     // .bind(format!(":{}", *GL_PORT))?
@@ -133,24 +150,12 @@ async fn net_update_files() -> MyRes<String> {
     let mut size: u64 = 0;
     let mut count = 0;
 
-    let statement =
-            "INSERT INTO songs (path, filename, songname, artist, album, length, seconds, rating, vote, deleted)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (path) DO UPDATE SET
-            songname=excluded.songname,
-            artist=excluded.artist,
-            album=excluded.album,
-            length=excluded.length,
-            seconds=excluded.seconds,
-            deleted=excluded.deleted";
-
     let mut db = db_con()?;
-
     let b = db.transaction().wrap_err("transaction")?;
+    let mut s = b.prepare(GL_INSERT_SONG_STMT).wrap_err("prepare")?;
 
     b.execute("UPDATE songs set deleted = 1", [])
-        .context("delete")?;
-    let mut s = b.prepare(statement).context("prepare")?;
+        .wrap_err("delete")?;
 
     let files = WalkDir::new(&*GL_MUSICDIR);
     files
@@ -173,36 +178,7 @@ async fn net_update_files() -> MyRes<String> {
             let path = entry.path().display().to_string();
             let filename = entry.file_name().to_string_lossy();
 
-            let songname;
-            let artist;
-            let album;
-
-            if let Ok(tags) = audiotags::Tag::new()
-                .with_tag_type(audiotags::TagType::Id3v2)
-                .read_from_path(&path)
-            {
-                songname = tags.title().unwrap_or_default().to_owned();
-                artist = tags.artist().unwrap_or_default().to_owned();
-                album = tags.album_title().unwrap_or_default().to_owned();
-            } else {
-                songname = "".to_string();
-                artist = "".to_string();
-                album = "".to_string();
-            };
-
-            let seconds = get_songlength_secs(&path);
-            let length = format_songlength(seconds);
-            let rating = GL_RATING_BASE;
-            let vote = 0;
-            let deleted = 0;
-
-            // result = format!("{result}{path}\n");
-            // Statement-Values aufbauen
-            let values = (
-                path, filename, songname, artist, album, length, seconds, rating, vote, deleted,
-            );
-
-            s.execute(values).unwrap();
+            add_song_in_transaction(&path, &filename, &mut s);
 
             count += 1;
             if count % 1000 == 0 {
@@ -217,6 +193,40 @@ async fn net_update_files() -> MyRes<String> {
     b.commit().wrap_err("commit")?;
 
     Ok("Ok".to_string())
+}
+
+fn add_song_in_transaction(path: &str, filename: &str, s: &mut Statement) {
+    println!("add_song_in_transaction({path}, {filename})");
+    let songname;
+    let artist;
+    let album;
+
+    if let Ok(tags) = audiotags::Tag::new()
+        .with_tag_type(audiotags::TagType::Id3v2)
+        .read_from_path(&path)
+    {
+        songname = tags.title().unwrap_or_default().to_owned();
+        artist = tags.artist().unwrap_or_default().to_owned();
+        album = tags.album_title().unwrap_or_default().to_owned();
+    } else {
+        songname = "".to_string();
+        artist = "".to_string();
+        album = "".to_string();
+    };
+
+    let seconds = get_songlength_secs(&path);
+    let length = format_songlength(seconds);
+    let rating = GL_RATING_BASE;
+    let vote = 0;
+    let deleted = 0;
+
+    // result = format!("{result}{path}\n");
+    // Statement-Values aufbauen
+    let values = (
+        path, filename, songname, artist, album, length, seconds, rating, vote, deleted,
+    );
+
+    s.execute(values).unwrap();
 }
 
 #[get("/random_id/{scale}")]
@@ -279,7 +289,7 @@ async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
 async fn net_songlist_web(app: Data<AppState>) -> MyRes<HttpResponse> {
     println!("net_songlist_web");
     db_update()?;
-    let sql = "select * from songs";
+    let sql = "select * from songs where deleted = 0";
 
     let c = db_con()?;
     let mut stmt = c.prepare(sql).wrap_err("prepare")?;
@@ -501,6 +511,49 @@ pub fn rng(map: &[(u32, i32)]) -> MyRes<i32> {
 
     // println!("rng return: len {}, index: {index}, id: {id}", map.len());
     Ok(id)
+}
+
+#[post("/upload")]
+async fn net_upload(mut payload: Multipart) -> HttpResponse {
+    println!("net_upload");
+    if let Some(field) = payload.next().await {
+        println!("net_upload field | {:?}", field);
+        if let Ok(mut field) = field {
+            let filename = field
+                .content_disposition()
+                .unwrap()
+                .get_filename()
+                .unwrap_or("default.mp3")
+                .to_owned();
+            let filepath = GL_UPLOADDIR.join(&filename);
+            println!("filename: {filename}, filepath: {filepath:?}");
+            let mut file = File::create(&filepath).expect("Failed to create file");
+
+            while let Some(chunk) = field.next().await {
+                if let Ok(chunk) = chunk {
+                    file.write_all(&chunk).expect("Failed to write to file");
+                }
+            }
+            println!("File saved: {:?}", filepath);
+
+            if let Err(e) = db_update() {
+                return HttpResponse::InternalServerError()
+                    .body(format!("Failed to update database: {}", e));
+            }
+
+            let Ok(mut db) = db_con() else {
+                return HttpResponse::InternalServerError().body("Failed to connect to database");
+            };
+
+            let t = db.transaction().unwrap();
+            let mut s = t.prepare(GL_INSERT_SONG_STMT).unwrap();
+            add_song_in_transaction(filepath.to_str().unwrap(), &filename, &mut s);
+            drop(s);
+            t.commit().unwrap();
+        }
+    }
+
+    HttpResponse::Ok().body("File uploaded successfully")
 }
 
 #[cfg(test)]

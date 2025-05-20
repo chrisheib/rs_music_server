@@ -26,3 +26,5 @@ minijinja = { version = "2.10.2", features = ["loader"] }
 minijinja-autoreload = "2.10.2"
 color-eyre = "0.6.4"
 itertools = "0.14.0"
+actix-multipart = "0.7.2"
+futures-util = "0.3.31"
