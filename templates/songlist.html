@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+
+<body>
+    <div><a href="/">Back</a></div>
+    <div>
+        <h1>Song List</h1>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Filename</th>
+                    <th>Title</th>
+                    <th>Artist</th>
+                    <th>Album</th>
+                    <th>Year</th>
+                    <th>Rating</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for song in songs %}
+                <tr>
+                    <td>{{ song.id }}</td>
+                    <td>{{ song.filename }}</td>
+                    <td>{{ song.title }}</td>
+                    <td>{{ song.artist }}</td>
+                    <td>{{ song.album }}</td>
+                    <td>{{ song.year }}</td>
+                    <td>{{ song.rating }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+</body>
+
+</html>

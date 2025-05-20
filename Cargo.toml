@@ -22,3 +22,7 @@ mp3-duration = "0.1"                                    # song length
 stable-eyre = "0.2"
 serde = { version = "1", features = ["derive"] }
 lazy_static = "1"
+minijinja = { version = "2.10.2", features = ["loader"] }
+minijinja-autoreload = "2.10.2"
+color-eyre = "0.6.4"
+itertools = "0.14.0"

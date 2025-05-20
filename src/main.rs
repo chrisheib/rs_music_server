@@ -2,19 +2,22 @@ use actix_files::NamedFile;
 use actix_web::{
     error::ErrorNotFound,
     get,
-    http::header::ContentDisposition,
-    http::header::DispositionParam,
-    http::header::DispositionType,
-    web::{self, Json},
-    App, HttpServer,
+    http::header::{ContentDisposition, DispositionParam, DispositionType},
+    web::{self, Data, Json},
+    App, HttpResponse, HttpServer,
 };
+use color_eyre::eyre::{eyre, Context};
+use color_eyre::{install, Result};
 use db::*;
+use itertools::Itertools;
 use json::{object, JsonValue};
 use lazy_static::lazy_static;
+use minijinja::Environment;
+use minijinja::{context, path_loader, Value};
+use minijinja_autoreload::AutoReloader;
 use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
 use serde::Serialize;
-use stable_eyre::eyre::{eyre, Context};
-use std::env;
+use std::{env, path::PathBuf};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -35,7 +38,14 @@ lazy_static! {
     static ref GL_PORT: i16 = env::var("PORT")
         .map(|v| v.parse::<i16>().unwrap_or(3000))
         .unwrap_or(3000);
-    static ref GL_MUSICDIR: String = env::var("MUSICDIR").unwrap_or("E:\\Musik\\".to_string());
+    static ref GL_MUSICDIR: PathBuf = env::var("MUSICDIR").and_then(|s| Ok(PathBuf::from(s))).unwrap_or(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("music")
+    );
+    // /music-srv/db/
+    static ref GL_DBDIR: PathBuf = env::var("DBDIR").and_then(|s| Ok(PathBuf::from(s))).unwrap_or(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    );
 }
 
 const GL_RATING_BASE: i32 = 2i32;
@@ -43,12 +53,37 @@ const GL_DEFAULT_RATING_SCALE: f32 = 2.5f32;
 const GL_DEBUG_SIZE: bool = false;
 const GL_REPLAY_PROTECTION: usize = 15;
 
+struct AppState {
+    template_env: AutoReloader,
+}
+
+impl AppState {
+    fn render_template(&self, name: &str, ctx: Value) -> Result<String> {
+        let env = self.template_env.acquire_env()?;
+        let template = env.get_template(name)?;
+        let rendered = template.render(ctx)?;
+        Ok(rendered)
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    println!("main");
-    println!("Port: {}", *GL_PORT);
+    install().unwrap();
+    println!("http://localhost:{}", *GL_PORT);
+    println!("MUSICDIR: {}", GL_MUSICDIR.to_str().unwrap_or_default());
 
-    HttpServer::new(|| {
+    let ext = web::Data::new(AppState {
+        template_env: AutoReloader::new(|notifier| {
+            let template_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates");
+            let mut env = Environment::new();
+            env.set_loader(path_loader(&template_path));
+
+            notifier.watch_path(&template_path, true);
+            Ok(env)
+        }),
+    });
+
+    HttpServer::new(move || {
         App::new()
             .service(net_update_files)
             .service(net_songlist)
@@ -62,12 +97,26 @@ async fn main() -> std::io::Result<()> {
             .service(net_songdata_pretty_by_id)
             .service(net_404)
             .service(net_ping)
+            .service(net_index)
+            .service(net_songlist_web)
+            .app_data(ext.clone())
     })
     // .bind(format!(":{}", *GL_PORT))?
     // .bind(format!("localhost:{}", *GL_PORT))?
     .bind(format!("0.0.0.0:{}", *GL_PORT))?
     .run()
     .await
+}
+
+#[get("/")]
+async fn net_index(app: Data<AppState>) -> MyRes<HttpResponse> {
+    println!("net_index");
+    let ctx = context! (
+        title => "Hello World",
+        name =>  "World",
+    );
+    let rendered = app.render_template("index.html", ctx)?;
+    Ok(HttpResponse::Ok().body(rendered))
 }
 
 #[get("/ping")]
@@ -224,6 +273,35 @@ async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
     let vec = vec?.into_iter().collect::<Result<Vec<_>, _>>()?;
 
     Ok(Json(vec))
+}
+
+#[get("/web/songs")]
+async fn net_songlist_web(app: Data<AppState>) -> MyRes<HttpResponse> {
+    println!("net_songlist_web");
+    db_update()?;
+    let sql = "select * from songs";
+
+    let c = db_con()?;
+    let mut stmt = c.prepare(sql).wrap_err("prepare")?;
+    let vec = stmt
+        .query_map([], |row| {
+            Ok(Song {
+                id: row.get::<_, i32>(0)?,
+                path: row.get::<_, String>(1)?,
+                filename: row.get::<_, String>(2)?,
+                songname: row.get::<_, String>(3)?,
+                artist: row.get::<_, String>(4)?,
+                album: row.get::<_, String>(5)?,
+                length: row.get::<_, String>(6)?,
+                seconds: row.get::<_, i32>(7)?,
+                rating: row.get::<_, i32>(8)?,
+                vote: row.get::<_, i32>(9)?,
+            })
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()?;
+    let rendered = app.render_template("songlist.html", context! {songs => &vec})?;
+    Ok(HttpResponse::Ok().body(rendered))
 }
 
 #[get("/songs/{id}")]

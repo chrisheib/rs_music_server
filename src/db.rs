@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use crate::MyRes;
+use crate::{MyRes, GL_DBDIR};
 use rusqlite::{Connection, Params};
 use stable_eyre::eyre::Context;
 
@@ -36,8 +36,5 @@ pub fn db_execute(sql: &str) -> MyRes<()> {
 }
 
 pub fn db_con() -> MyRes<Connection> {
-    if !Path::new("/music-srv/db/").exists() {
-        fs::create_dir_all("/music-srv/db/")?;
-    }
-    Ok(Connection::open("/music-srv/db/songdb.sqlite")?)
+    Ok(Connection::open(GL_DBDIR.join("songdb.sqlite"))?)
 }
