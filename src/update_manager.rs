@@ -38,7 +38,7 @@ pub fn db_update() -> MyRes<()> {
 }
 
 fn v0() -> MyRes<()> {
-    db_execute("DROP TABLE IF EXISTS songs;")?;
+    db_execute("DROP TABLE IF EXISTS songs;", [])?;
     db_execute(
         "CREATE TABLE songs (
         id INTEGER not null primary key autoincrement,
@@ -52,6 +52,7 @@ fn v0() -> MyRes<()> {
         rating INTEGER,
         vote INTEGER
     );",
+        [],
     )
 }
 
@@ -61,24 +62,34 @@ fn v1() -> MyRes<()> {
         key TEXT unique primary key,
         value TEXT
     );",
+        [],
     )?;
-    db_execute("INSERT INTO config (key, value) values ('version', '2')")?;
-    db_execute("ALTER TABLE songs ADD COLUMN deleted INTEGER DEFAULT 0 NOT NULL")
+    db_execute(
+        "INSERT INTO config (key, value) values ('version', '2')",
+        [],
+    )?;
+    db_execute(
+        "ALTER TABLE songs ADD COLUMN deleted INTEGER DEFAULT 0 NOT NULL",
+        [],
+    )
 }
 
 fn v2() -> MyRes<()> {
-    db_execute("ALTER TABLE songs ADD COLUMN times_played INTEGER DEFAULT 0 NOT NULL")?;
-    db_execute("UPDATE config SET value = '3' WHERE key LIKE 'version'")
+    db_execute(
+        "ALTER TABLE songs ADD COLUMN times_played INTEGER DEFAULT 0 NOT NULL",
+        [],
+    )?;
+    db_execute("UPDATE config SET value = '3' WHERE key LIKE 'version'", [])
 }
 
 fn v3() -> MyRes<()> {
-    db_execute("UPDATE songs SET rating = 0 WHERE rating < 100")?;
-    db_execute("UPDATE songs SET rating = 1 WHERE rating = 100")?;
-    db_execute("UPDATE songs SET rating = 2 WHERE rating = 200")?;
-    db_execute("UPDATE songs SET rating = 3 WHERE rating = 400")?;
-    db_execute("UPDATE songs SET rating = 4 WHERE rating = 800")?;
-    db_execute("UPDATE songs SET rating = 5 WHERE rating = 1600")?;
-    db_execute("UPDATE songs SET rating = 6 WHERE rating = 3200")?;
-    db_execute("UPDATE songs SET rating = 7 WHERE rating >= 6400")?;
-    db_execute("UPDATE config SET value = '4' WHERE key LIKE 'version'")
+    db_execute("UPDATE songs SET rating = 0 WHERE rating < 100", [])?;
+    db_execute("UPDATE songs SET rating = 1 WHERE rating = 100", [])?;
+    db_execute("UPDATE songs SET rating = 2 WHERE rating = 200", [])?;
+    db_execute("UPDATE songs SET rating = 3 WHERE rating = 400", [])?;
+    db_execute("UPDATE songs SET rating = 4 WHERE rating = 800", [])?;
+    db_execute("UPDATE songs SET rating = 5 WHERE rating = 1600", [])?;
+    db_execute("UPDATE songs SET rating = 6 WHERE rating = 3200", [])?;
+    db_execute("UPDATE songs SET rating = 7 WHERE rating >= 6400", [])?;
+    db_execute("UPDATE config SET value = '4' WHERE key LIKE 'version'", [])
 }

@@ -19,7 +19,7 @@ use minijinja::{path_loader, Value};
 use minijinja_autoreload::AutoReloader;
 use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
 use rusqlite::Statement;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{env, fs::File, io::Write, path::PathBuf};
 use std::{
     path::Path,
@@ -116,6 +116,7 @@ async fn main() -> std::io::Result<()> {
             .service(net_index)
             .service(net_songlist_web)
             .service(net_upload)
+            .service(net_update_songdata_by_id_post)
             .app_data(ext.clone())
     })
     // .bind(format!(":{}", *GL_PORT))?
@@ -255,13 +256,14 @@ struct Song {
     seconds: i32,
     rating: i32,
     vote: i32,
+    times_played: i32,
 }
 
 #[get("/songs")]
 async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
     println!("net_songlist");
     db_update()?;
-    let sql = "select * from songs";
+    let sql = "select id, path, filename, songname, artist, album, length, seconds, rating, vote, times_played from songs where deleted = 0";
 
     let c = db_con()?;
     let mut stmt = c.prepare(sql).wrap_err("prepare")?;
@@ -277,6 +279,7 @@ async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
             seconds: row.get::<_, i32>(7)?,
             rating: row.get::<_, i32>(8)?,
             vote: row.get::<_, i32>(9)?,
+            times_played: row.get::<_, i32>(10)?,
         })
     });
 
@@ -289,7 +292,7 @@ async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
 async fn net_songlist_web(app: Data<AppState>) -> MyRes<HttpResponse> {
     println!("net_songlist_web");
     db_update()?;
-    let sql = "select * from songs where deleted = 0";
+    let sql = "select id, path, filename, songname, artist, album, length, seconds, rating, vote, times_played from songs where deleted = 0";
 
     let c = db_con()?;
     let mut stmt = c.prepare(sql).wrap_err("prepare")?;
@@ -306,6 +309,7 @@ async fn net_songlist_web(app: Data<AppState>) -> MyRes<HttpResponse> {
                 seconds: row.get::<_, i32>(7)?,
                 rating: row.get::<_, i32>(8)?,
                 vote: row.get::<_, i32>(9)?,
+                times_played: row.get::<_, i32>(10)?,
             })
         })
         .unwrap()
@@ -383,7 +387,7 @@ async fn net_song_upvote_by_id(id: web::Path<u32>) -> MyRes<String> {
     if val < 7 {
         val += 1;
         let i = &format!("Update songs set rating = {val} where id = {id}");
-        db_execute(i)?;
+        db_execute(i, [])?;
     }
     Ok(format!("Upvoted {id}. New Score: {val}"))
 }
@@ -397,7 +401,7 @@ async fn net_song_downvote_by_id(id: web::Path<u32>) -> MyRes<String> {
     if val > 0 {
         val -= 1;
         let i = &format!("Update songs set rating = {val} where id = {id}");
-        db_execute(i)?;
+        db_execute(i, [])?;
     }
     Ok(format!("Downvoted {id}. New Score: {val}"))
 }
@@ -423,7 +427,7 @@ fn get_songlength_secs(path: &str) -> u64 {
 fn increase_times_played(id: u32) -> MyRes<()> {
     println!("increase_times_played({id})");
     let i = &format!("Update songs set times_played = times_played + 1 where id = {id}");
-    db_execute(i)
+    db_execute(i, [])
 }
 
 fn format_songlength(seconds: u64) -> String {
@@ -554,6 +558,31 @@ async fn net_upload(mut payload: Multipart) -> HttpResponse {
     }
 
     HttpResponse::Ok().body("File uploaded successfully")
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct UpdateSongData {
+    songname: String,
+    artist: String,
+    album: String,
+    rating: u8,
+}
+
+#[post("/songdata/{id}")]
+async fn net_update_songdata_by_id_post(
+    id: web::Path<u32>,
+    data: Json<UpdateSongData>,
+) -> MyRes<String> {
+    println!("net_songdata_by_id_post({id})");
+    db_update()?;
+    let d = data.into_inner();
+    let id = id.into_inner();
+
+    let sql = "UPDATE songs SET songname = ?, artist = ?, album = ?, rating = ? WHERE id = ?";
+
+    db_execute(&sql, (&d.songname, &d.artist, &d.album, &d.rating, &id))?;
+
+    Ok(format!("Updated song with ID: {id}"))
 }
 
 #[cfg(test)]

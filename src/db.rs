@@ -1,6 +1,7 @@
 use std::{fs, path::Path};
 
 use crate::{MyRes, GL_DBDIR};
+use color_eyre::eyre::{bail, eyre};
 use rusqlite::{Connection, Params};
 use stable_eyre::eyre::Context;
 
@@ -28,10 +29,15 @@ pub fn db_str_read(sql: &str) -> MyRes<String> {
     Ok(c.query_row::<String, _, _>(sql, [], |row| row.get(0))?)
 }
 
-pub fn db_execute(sql: &str) -> MyRes<()> {
+pub fn db_execute<P>(sql: &str, params: P) -> MyRes<()>
+where
+    P: Params,
+{
     let conn = db_con()?;
-    conn.execute(sql, [])
-        .wrap_err(format!("db_execute: {sql}"))?;
+    if let Err(e) = conn.execute(sql, params) {
+        println!("db_execute: {sql}, error: {e}");
+        return Err(Box::new(e));
+    }
     Ok(())
 }
 
