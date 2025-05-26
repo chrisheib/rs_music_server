@@ -332,8 +332,11 @@ async fn net_song_by_id(id: web::Path<u32>) -> MyRes<NamedFile> {
 async fn net_song_random() -> MyRes<NamedFile> {
     println!("net_song_random");
     db_update()?;
-    let id = get_weighted_random_id(GL_DEFAULT_RATING_SCALE)?;
-    let path = get_songpath_by_id(id.parse::<u32>().unwrap_or_default())?;
+    let id = get_weighted_random_id(GL_DEFAULT_RATING_SCALE)?
+        .parse::<u32>()
+        .unwrap_or_default();
+    let path = get_songpath_by_id(id)?;
+    increase_times_played(id)?;
     get_file_by_name(&path)
 }
 
@@ -386,8 +389,8 @@ async fn net_song_upvote_by_id(id: web::Path<u32>) -> MyRes<String> {
     let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {id}"))?;
     if val < 7 {
         val += 1;
-        let i = &format!("Update songs set rating = {val} where id = {id}");
-        db_execute(i, [])?;
+        let i = "Update songs set rating = ? where id = ?";
+        db_execute(i, (val, id))?;
     }
     Ok(format!("Upvoted {id}. New Score: {val}"))
 }
@@ -400,8 +403,8 @@ async fn net_song_downvote_by_id(id: web::Path<u32>) -> MyRes<String> {
     let mut val = adb_uint32_read(&format!("SELECT rating FROM songs WHERE id = {id}"))?;
     if val > 0 {
         val -= 1;
-        let i = &format!("Update songs set rating = {val} where id = {id}");
-        db_execute(i, [])?;
+        let i = "Update songs set rating = ? where id = ?";
+        db_execute(i, (val, id))?;
     }
     Ok(format!("Downvoted {id}. New Score: {val}"))
 }
@@ -426,8 +429,8 @@ fn get_songlength_secs(path: &str) -> u64 {
 
 fn increase_times_played(id: u32) -> MyRes<()> {
     println!("increase_times_played({id})");
-    let i = &format!("Update songs set times_played = times_played + 1 where id = {id}");
-    db_execute(i, [])
+    let i = "Update songs set times_played = times_played + 1 where id = ?";
+    db_execute(i, [id])
 }
 
 fn format_songlength(seconds: u64) -> String {

@@ -4,10 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
-
-    <!-- RevoGrid -->
-    <script src="https://cdn.jsdelivr.net/npm/@revolist/revogrid@latest/dist/revo-grid/revo-grid.js"></script>
+    <title>Songlist</title>
 
     <!-- jSpreadSheet -->
     <script src="https://bossanova.uk/jspreadsheet/v5/jspreadsheet.js"></script>
@@ -21,36 +18,7 @@
 <body>
     <div><a href="/">Back</a></div>
     <h1>Song List</h1>
-    <h2>RevoGrid</h2>
-    <revo-grid style="height: 200px"></revo-grid>
-    <h2>JSpreadsheet</h2>
     <div id="spreadsheet"></div>
-    <!-- <div> -->
-    <!-- <table>
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Filename</th>
-                    <th>Title</th>
-                    <th>Artist</th>
-                    <th>Album</th>
-                    <th>Rating</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for song in songs %}
-                <tr>
-                    <td>{{ song.id }}</td>
-                    <td>{{ song.filename }}</td>
-                    <td>{{ song.title }}</td>
-                    <td>{{ song.artist }}</td>
-                    <td>{{ song.album }}</td>
-                    <td>{{ song.rating }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table> -->
-    <!-- </div> -->
 
     <script>
         window.songs = [];
@@ -65,42 +33,6 @@
             times_played: {{ song.times_played }},
         });
         {% endfor %}
-
-        function newColumn(prop, name) {
-            return { prop: prop, name: name, sortable: true, order: "asc" };
-        }
-
-        function newTextColumn(prop, name) {
-            let c = newColumn(prop, name);
-            return c;
-        }
-
-        function newNumberColumn(prop, name) {
-            let c = newColumn(prop, name);
-            c.filter = "number";
-            return c;
-        }
-
-        // Snag your grid element from the DOM
-        const grid = document.querySelector('revo-grid');
-
-        grid.autoSizeColumn = {
-            mode: 'autoSizeAll',
-            allColumns: true
-        };
-        grid.filter = true;
-        grid.columns = [
-            newNumberColumn("id", "ID"),
-            newTextColumn("filename", "Filename"),
-            newTextColumn("title", "Title"),
-            newTextColumn("artist", "Artist"),
-            newTextColumn("album", "Album"),
-            newNumberColumn("rating", "Rating")
-        ];
-        grid.source = window.songs;
-
-
-
 
         // JSpreadsheet
         // https://bossanova.uk/jspreadsheet/docs/
