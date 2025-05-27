@@ -13,30 +13,57 @@
     <link rel="stylesheet" href="https://jsuites.net/v5/jsuites.css" type="text/css" />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Material+Icons" />
 
+    <!-- Green Audio Player -->
+    <link rel="stylesheet" type="text/css"
+        href="https://cdn.jsdelivr.net/gh/greghub/green-audio-player/dist/css/green-audio-player.min.css">
+    <script src="https://cdn.jsdelivr.net/gh/greghub/green-audio-player/dist/js/green-audio-player.min.js"></script>
+
+    <!-- Move search to the left -->
+    <style>
+        .jss_filter {
+            margin-top: 10px;
+            display: flex !important;
+            flex-direction: row;
+            align-items: center;
+            justify-content: flex-start;
+        }
+
+        .jss_filter>div:first-child {
+            order: 1;
+            /* or 2, depending on your needs */
+        }
+
+        .jss_filter>div:last-child {
+            order: 0;
+            /* Move search bar to the left */
+        }
+    </style>
 </head>
 
 <body>
     <div><a href="/">Back</a></div>
     <h1>Song List</h1>
+    <div>
+        <input type="text" id="player_song_id" onkeypress="if (event.code == 'Enter') changeSong()" />
+        <input type="button" onclick="changeSong()" value="Change Song" />
+        <input type="button" onclick="changeToRandomSong()" value="Random Song" />
+
+        <div class="gap-example" style="margin-top: 15px;">
+            <audio>
+            </audio>
+        </div>
+    </div>
+
     <div id="spreadsheet"></div>
 
     <script>
-        window.songs = [];
-        {% for song in songs %}
-        window.songs.push({
-            id: {{ song.id }},
-            filename: "{{ song.filename }}",
-            songname: "{{ song.songname }}",
-            artist: "{{ song.artist }}",
-            album: "{{ song.album }}",
-            rating: {{ song.rating }},
-            times_played: {{ song.times_played }},
-        });
-        {% endfor %}
+        window.songs = {{ songs | tojson }};
 
         // JSpreadsheet
         // https://bossanova.uk/jspreadsheet/docs/
         // https://github.com/jspreadsheet/ce/blob/master/docs/jspreadsheet/v4/quick-reference.md?plain=1
+
+        // Player: https://github.com/greghub/green-audio-player/blob/master/examples/single-instance.html
 
         function sendRowAsSong(row) {
             let song = rowToSong(row);
@@ -106,7 +133,7 @@
                 allowRenameColumn: false,
                 allowComments: false,
                 search: true,
-                pagination: 300,
+                pagination: 100,
                 data: window.songs.map(song => [
                     song.id,
                     song.filename,
@@ -127,6 +154,33 @@
                 ]
             }],
         });
+
+
+        // Initialize the audio player
+        new GreenAudioPlayer('.gap-example');
+
+        function changeSong() {
+            let songId = document.getElementById("player_song_id").value;
+            console.log("Changing song to ID:", songId);
+            let audio = document.querySelector('.gap-example audio');
+            audio.src = `/songs/${songId}`;
+            audio.type = 'audio/mpeg';
+            audio.play().catch(err => {
+                console.error("Error playing audio:", err);
+            });
+        }
+
+        async function changeToRandomSong() {
+            let randomId = await fetch('/random_id')
+                .then(response => response.text())
+                .catch(err => {
+                    console.error("Error fetching random song index:", err);
+                });
+            console.log("Changing to random song:", randomId);
+            document.getElementById("player_song_id").value = randomId;
+            changeSong();
+        }
+
     </script>
 
 </body>

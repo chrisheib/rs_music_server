@@ -314,6 +314,12 @@ async fn net_songlist_web(app: Data<AppState>) -> MyRes<HttpResponse> {
         })
         .unwrap()
         .collect::<Result<Vec<_>, _>>()?;
+    // vec.iter().for_each(|s| {
+    //     println!(
+    //         "Song: {} - {} - {} - {} - {}",
+    //         s.id, s.songname, s.artist, s.album, s.length
+    //     );
+    // });
     let rendered = app.render_template("songlist.html", context! {songs => &vec})?;
     Ok(HttpResponse::Ok().body(rendered))
 }
