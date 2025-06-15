@@ -1,9 +1,5 @@
-use std::{fs, path::Path};
-
 use crate::{MyRes, GL_DBDIR};
-use color_eyre::eyre::{bail, eyre};
 use rusqlite::{Connection, Params};
-use stable_eyre::eyre::Context;
 
 pub fn db_select<T, P, F>(sql: &str, params: P, f: F) -> MyRes<T>
 where

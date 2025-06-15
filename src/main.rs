@@ -12,12 +12,13 @@ use color_eyre::eyre::{eyre, Context};
 use color_eyre::{install, Result};
 use db::*;
 use futures_util::StreamExt;
+use itertools::Itertools;
 use json::{object, JsonValue};
 use lazy_static::lazy_static;
 use minijinja::{context, Environment};
 use minijinja::{path_loader, Value};
 use minijinja_autoreload::AutoReloader;
-use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
+use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng, Rng};
 use rusqlite::Statement;
 use serde::{Deserialize, Serialize};
 use std::{env, fs::File, io::Write, path::PathBuf};
@@ -486,10 +487,10 @@ fn get_weighted_random_id(scale: f32) -> MyRes<String> {
         .collect::<Result<Vec<(u32, i32)>, _>>()?
         .into_iter()
         .map(|a| {
-            let rating = scale.powi((a.0 - 1) as i32).round() as u32;
+            let rating = scale.powi((a.0 - 1) as i32).ceil() as usize;
             (rating, a.1)
         })
-        .collect::<Vec<(u32, i32)>>();
+        .collect_vec();
 
     let mut c: i32;
 
@@ -516,7 +517,7 @@ fn get_weighted_random_id(scale: f32) -> MyRes<String> {
     Ok(c.to_string())
 }
 
-pub fn rng(map: &[(u32, i32)]) -> MyRes<i32> {
+pub fn rng(map: &[(usize, i32)]) -> MyRes<i32> {
     // println!("rng");
     let res = WeightedIndex::new(map.iter().map(|item| item.0))?;
     let index = res.sample(&mut thread_rng());
@@ -594,6 +595,66 @@ async fn net_update_songdata_by_id_post(
     Ok(format!("Updated song with ID: {id}"))
 }
 
+#[test]
+/// takes forwever, call with cargo test --release
+fn test() {
+    use itertools::Itertools;
+    use std::collections::HashMap;
+    use std::{thread, time::Duration};
+    const SCALE: f32 = 2.5;
+
+    // create test song entries
+    let mut map = Vec::new();
+    let mut rand = rand::thread_rng();
+    for i in 0..5000 {
+        let weight = rand.gen_range(0..=6);
+        let rating = SCALE.powi(weight).ceil() as usize;
+        map.push((rating, i));
+    }
+
+    // run the rng function and store calls in a HashMap
+    let mut hash = HashMap::<(usize, i32), usize>::new();
+
+    for r in 0..10_000_000 {
+        let out = rng(&map).unwrap_or_default();
+        *hash.entry((map[out as usize].0, out)).or_insert(0) += 1;
+        if r % 1_000_000 == 0 {
+            mylog(&format!("rng call {r} done"));
+        }
+    }
+
+    let mut v = hash.iter().collect_vec();
+    v.sort_unstable_by_key(|a| a.1);
+    v = v.into_iter().rev().collect_vec();
+    for r in 0..7 {
+        let m = v
+            .iter()
+            .filter(|((a, _), _)| *a == SCALE.powi(r).ceil() as usize)
+            .collect_vec();
+
+        mylog(&format!("r: {:?}", m.last()));
+        mylog(&format!("r: {:?}", m.first()));
+    }
+
+    thread::sleep(Duration::from_secs(5));
+}
+
+#[allow(dead_code)]
+fn mylog(s: &str) {
+    // open log.txt and append
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("log.txt")
+        .unwrap_or_else(|_| {
+            println!("Could not open log.txt");
+            std::process::exit(1);
+        });
+    if let Err(e) = writeln!(file, "{}", s) {
+        println!("Could not write to log.txt: {}", e);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -603,15 +664,15 @@ mod tests {
     fn test_vec_rng() {
         println!("test_vec_rng");
         let map = vec![
-            (100u32, 100i32),
-            (200u32, 200i32),
-            (300u32, 300i32),
-            (100u32, 400i32),
-            (50u32, 500i32),
-            (250u32, 600i32),
-            (100u32, i32::MAX),
-            (100u32, i32::MIN),
-            (100u32, 0),
+            (100, 100i32),
+            (200, 200i32),
+            (300, 300i32),
+            (100, 400i32),
+            (50, 500i32),
+            (250, 600i32),
+            (100, i32::MAX),
+            (100, i32::MIN),
+            (100, 0),
         ];
 
         let mut hash = HashMap::<i32, usize>::new();
