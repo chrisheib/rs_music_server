@@ -18,7 +18,7 @@ use lazy_static::lazy_static;
 use minijinja::{context, Environment};
 use minijinja::{path_loader, Value};
 use minijinja_autoreload::AutoReloader;
-use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng, Rng};
+use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
 use rusqlite::Statement;
 use serde::{Deserialize, Serialize};
 use std::{env, fs::File, io::Write, path::PathBuf};
@@ -26,6 +26,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
+use tokio::join;
 use walkdir::WalkDir;
 
 use crate::update_manager::db_update;
@@ -38,10 +39,13 @@ type MyRes<T> = Result<T, Box<dyn std::error::Error>>;
 type Mylist = Arc<Mutex<Vec<i32>>>;
 
 lazy_static! {
-    static ref LAST_SONGS: Mylist = Arc::new(Mutex::new(Vec::new()));
+        static ref LAST_SONGS: Mylist = Arc::new(Mutex::new(Vec::new()));
     static ref GL_PORT: i16 = env::var("PORT")
         .map(|v| v.parse::<i16>().unwrap_or(3000))
         .unwrap_or(3000);
+    static ref GL_INTERNAL_PORT: i16 = env::var("PORT_INTERNAL")
+        .map(|v| v.parse::<i16>().unwrap_or(3001))
+        .unwrap_or(3001);
     static ref GL_MUSICDIR: PathBuf = env::var("MUSICDIR").and_then(|s| Ok(PathBuf::from(s))).unwrap_or(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("music")
@@ -83,9 +87,9 @@ impl AppState {
     }
 }
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    install().unwrap();
+#[tokio::main]
+async fn main() -> Result<()> {
+    install()?;
     println!("http://localhost:{}", *GL_PORT);
     println!("MUSICDIR: {}", GL_MUSICDIR.to_str().unwrap_or_default());
 
@@ -100,7 +104,30 @@ async fn main() -> std::io::Result<()> {
         }),
     });
 
-    HttpServer::new(move || {
+    let ext1 = ext.clone();
+
+    let exposed_server_handle = HttpServer::new(move || {
+        App::new()
+            .service(net_update_files)
+            .service(net_songlist)
+            .service(net_get_random_id)
+            .service(net_get_random_id_with_scale)
+            .service(net_song_random)
+            .service(net_song_by_id)
+            .service(net_song_upvote_by_id)
+            .service(net_song_downvote_by_id)
+            .service(net_songdata_by_id)
+            .service(net_songdata_pretty_by_id)
+            .service(net_404)
+            .service(net_ping)
+            .app_data(ext1.clone())
+    })
+    // .bind(format!(":{}", *GL_PORT))?
+    // .bind(format!("localhost:{}", *GL_PORT))?
+    .bind(format!("0.0.0.0:{}", *GL_PORT))?
+    .run();
+
+    let exposed_server_handle_2 = HttpServer::new(move || {
         App::new()
             .service(net_update_files)
             .service(net_songlist)
@@ -122,9 +149,16 @@ async fn main() -> std::io::Result<()> {
     })
     // .bind(format!(":{}", *GL_PORT))?
     // .bind(format!("localhost:{}", *GL_PORT))?
-    .bind(format!("0.0.0.0:{}", *GL_PORT))?
-    .run()
-    .await
+    .bind(format!("0.0.0.0:{}", *GL_INTERNAL_PORT))?
+    .run();
+    println!(
+        "Starting servers on ports {} and {}",
+        *GL_PORT, *GL_INTERNAL_PORT
+    );
+    let (res1, res2) = join!(exposed_server_handle, exposed_server_handle_2);
+    res1?;
+    res2?;
+    Ok(())
 }
 
 #[get("/")]
@@ -487,7 +521,7 @@ fn get_weighted_random_id(scale: f32) -> MyRes<String> {
         .collect::<Result<Vec<(u32, i32)>, _>>()?
         .into_iter()
         .map(|a| {
-            let rating = scale.powi((a.0 - 1) as i32).ceil() as usize;
+            let rating = scale_rating(scale, a.0 as i32 - 1);
             (rating, a.1)
         })
         .collect_vec();
@@ -564,10 +598,12 @@ async fn net_upload(mut payload: Multipart) -> HttpResponse {
             add_song_in_transaction(filepath.to_str().unwrap(), &filename, &mut s);
             drop(s);
             t.commit().unwrap();
+            let new_id = db.last_insert_rowid();
+            println!("new id: {new_id}");
+            return HttpResponse::Ok().body(format!("File uploaded successfully, id: {new_id}"));
         }
     }
-
-    HttpResponse::Ok().body("File uploaded successfully")
+    HttpResponse::BadRequest().body("Failed to upload file")
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -595,10 +631,16 @@ async fn net_update_songdata_by_id_post(
     Ok(format!("Updated song with ID: {id}"))
 }
 
+fn scale_rating(scale: f32, weight: i32) -> usize {
+    // Scale the rating based on the provided scale factor
+    scale.powi(weight).ceil() as usize
+}
+
 #[test]
 /// takes forwever, call with cargo test --release
 fn test() {
     use itertools::Itertools;
+    use rand::Rng;
     use std::collections::HashMap;
     use std::{thread, time::Duration};
     const SCALE: f32 = 2.5;
@@ -608,7 +650,7 @@ fn test() {
     let mut rand = rand::thread_rng();
     for i in 0..5000 {
         let weight = rand.gen_range(0..=6);
-        let rating = SCALE.powi(weight).ceil() as usize;
+        let rating = scale_rating(SCALE, weight);
         map.push((rating, i));
     }
 
@@ -629,14 +671,48 @@ fn test() {
     for r in 0..7 {
         let m = v
             .iter()
-            .filter(|((a, _), _)| *a == SCALE.powi(r).ceil() as usize)
+            .filter(|((a, _), _)| *a == scale_rating(SCALE, r))
             .collect_vec();
 
         mylog(&format!("r: {:?}", m.last()));
         mylog(&format!("r: {:?}", m.first()));
     }
 
-    thread::sleep(Duration::from_secs(5));
+    thread::sleep(Duration::from_secs(1));
+}
+
+#[test]
+fn get_scale() {
+    mylog("scale");
+    let count_1 = db_uint32_read("select count(*) from songs where rating = 1").unwrap_or_default();
+    mylog(&format!("count_1: {count_1}"));
+    let count_2 = db_uint32_read("select count(*) from songs where rating = 2").unwrap_or_default();
+    mylog(&format!("count_2: {count_2}"));
+    let count_3 = db_uint32_read("select count(*) from songs where rating = 3").unwrap_or_default();
+    mylog(&format!("count_3: {count_3}"));
+    let count_4 = db_uint32_read("select count(*) from songs where rating = 4").unwrap_or_default();
+    mylog(&format!("count_4: {count_4}"));
+    let count_5 = db_uint32_read("select count(*) from songs where rating = 5").unwrap_or_default();
+    mylog(&format!("count_5: {count_5}"));
+    let count_6 = db_uint32_read("select count(*) from songs where rating = 6").unwrap_or_default();
+    mylog(&format!("count_6: {count_6}"));
+    let count_7 = db_uint32_read("select count(*) from songs where rating = 7").unwrap_or_default();
+    mylog(&format!("count_7: {count_7}"));
+
+    for i in 1..100 {
+        let lower = scale_rating(i as f32 / 10.0, 1) as u32 * count_1
+            + scale_rating(i as f32 / 10.0, 2) as u32 * count_2
+            + scale_rating(i as f32 / 10.0, 3) as u32 * count_3
+            + scale_rating(i as f32 / 10.0, 4) as u32 * count_4;
+        let upper = scale_rating(i as f32 / 10.0, 5) as u32 * count_5
+            + scale_rating(i as f32 / 10.0, 6) as u32 * count_6
+            + scale_rating(i as f32 / 10.0, 7) as u32 * count_7;
+        mylog(&format!("scale: {i}, lower: {lower}, upper: {upper}"));
+        if upper > lower {
+            mylog("done!");
+            break;
+        }
+    }
 }
 
 #[allow(dead_code)]
