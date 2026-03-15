@@ -34,6 +34,7 @@ cargo run --release
 
 ### YouTube download job queue (2026-03-15)
 Adds a persistent `download_jobs` table (DB schema v5) and a full multi-step download pipeline driven by a background Tokio supervisor.
-Users enqueue a YouTube URL with song metadata from `/web/jobs`; the worker drives each job through download → mp3gain → ffmpeg → rename → move → DB import, persisting step state and file paths for idempotent restart recovery.
+Users enqueue a YouTube URL with song metadata from `/web/jobs`; the worker drives each job through download → ensure_mp3 → mp3gain → ffmpeg → rename → move → DB import, persisting step state and file paths for idempotent restart recovery.
+The download step now requests `bestaudio/best` and `ensure_mp3` converts non-MP3 downloads to MP3 via `ffmpeg` before normalization.
 The jobs page polls `/jobs/last-completed-at` and shows a refresh prompt when new completions arrive; per-step error output is stored and displayed inline.
 Per-job cookie files (`/cookies/job-<id>.txt`) support yt-dlp authentication and are deleted after the download step.

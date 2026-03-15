@@ -102,6 +102,7 @@ impl JobStatus {
 pub enum JobStep {
     Created,
     Downloading,
+    EnsureMp3,
     Mp3Gain,
     FfmpegAdjust,
     Rename,
@@ -116,6 +117,7 @@ impl JobStep {
         match self {
             JobStep::Created => "created",
             JobStep::Downloading => "downloading",
+            JobStep::EnsureMp3 => "ensure_mp3",
             JobStep::Mp3Gain => "mp3gain",
             JobStep::FfmpegAdjust => "ffmpeg_adjust",
             JobStep::Rename => "rename",
@@ -130,6 +132,7 @@ impl JobStep {
         match raw {
             "created" => Some(JobStep::Created),
             "downloading" => Some(JobStep::Downloading),
+            "ensure_mp3" => Some(JobStep::EnsureMp3),
             "mp3gain" => Some(JobStep::Mp3Gain),
             "ffmpeg_adjust" => Some(JobStep::FfmpegAdjust),
             "rename" => Some(JobStep::Rename),
@@ -145,12 +148,13 @@ impl JobStep {
         match self {
             JobStep::Created => 0,
             JobStep::Downloading => 1,
-            JobStep::Mp3Gain => 2,
-            JobStep::FfmpegAdjust => 3,
-            JobStep::Rename => 4,
-            JobStep::MoveToMusicDir => 5,
-            JobStep::ImportDb => 6,
-            JobStep::Done => 7,
+            JobStep::EnsureMp3 => 2,
+            JobStep::Mp3Gain => 3,
+            JobStep::FfmpegAdjust => 4,
+            JobStep::Rename => 5,
+            JobStep::MoveToMusicDir => 6,
+            JobStep::ImportDb => 7,
+            JobStep::Done => 8,
         }
     }
 }
@@ -264,7 +268,7 @@ pub fn create_job_db(data: &CreateJobRequest) -> MyRes<i64> {
             data.rating,
             JobStatus::Queued.as_db_str(),
             JobStep::Created.as_db_str(),
-            JobStep::Created.index()
+            JobStep::Created.index(),
         ),
     )?;
 
@@ -364,7 +368,7 @@ pub fn update_job_stage(
             step.index(),
             attempt_count,
             error_message,
-            job_id
+            job_id,
         ),
     )?;
 
@@ -393,7 +397,7 @@ pub fn update_job_paths(
             downloaded_path,
             normalized_path,
             final_path,
-            job_id
+            job_id,
         ),
     )?;
 
@@ -418,7 +422,7 @@ pub fn mark_job_completed(job_id: i32, song_id: i32) -> MyRes<bool> {
             JobStep::Done.as_db_str(),
             JobStep::Done.index(),
             song_id,
-            job_id
+            job_id,
         ),
     )?;
 
@@ -442,7 +446,7 @@ pub fn mark_job_failed(job_id: i32, step: JobStep, error_message: &str) -> MyRes
             step.as_db_str(),
             step.index(),
             error_message,
-            job_id
+            job_id,
         ),
     )?;
 
@@ -505,7 +509,9 @@ pub async fn net_jobs_create(payload: Json<CreateJobRequest>) -> MyRes<Json<Crea
     if let Some(cookie_text) = cookie_payload.as_deref() {
         if let Err(err) = write_job_cookie_file(inserted_id_i32, cookie_text) {
             let _ = delete_job_db(inserted_id_i32);
-            return Err(format!("Failed to persist cookie file for job {inserted_id_i32}: {err}").into());
+            return Err(
+                format!("Failed to persist cookie file for job {inserted_id_i32}: {err}").into(),
+            );
         }
     }
 
@@ -559,25 +565,15 @@ pub fn import_job_song(job_id: i32) -> MyRes<i32> {
     conn.execute(
         INSERT_JOB_SONG_STMT,
         (
-            final_path,
-            filename,
-            songname,
-            artist,
-            album,
-            length,
-            seconds,
-            rating,
-            0,
-            0,
+            final_path, filename, songname, artist, album, length, seconds, rating, 0, 0,
         ),
     )?;
 
-    let song_id = conn.query_row(
-        "SELECT id FROM songs WHERE path = ?",
-        [final_path],
-        |row| row.get::<_, i32>(0),
-    )?;
+    let song_id = conn.query_row("SELECT id FROM songs WHERE path = ?", [final_path], |row| {
+        row.get::<_, i32>(0)
+    })?;
 
+    delete_job_upload_dir_if_exists(job_id)?;
     mark_job_completed(job_id, song_id)?;
     Ok(song_id)
 }
@@ -648,10 +644,8 @@ async fn job_supervisor_loop() -> MyRes<()> {
         };
 
         if let Err(err) = process_claimed_job(&job) {
-            let message = truncate_error_message(&format!(
-                "State machine failed for job {}: {err}",
-                job.id
-            ));
+            let message =
+                truncate_error_message(&format!("State machine failed for job {}: {err}", job.id));
             log_job_error(&message);
         }
     }
@@ -757,7 +751,20 @@ fn process_claimed_job(job: &Job) -> MyRes<()> {
         }
     }
 
-    match run_mp3gain_step(job.id, attempt_count, &downloaded_path, &mut normalized_path) {
+    match run_ensure_mp3_step(job.id, attempt_count, &temp_dir, &mut downloaded_path) {
+        Ok(()) => {}
+        Err(err) => {
+            fail_job_with_step(job.id, JobStep::EnsureMp3, err)?;
+            return Ok(());
+        }
+    }
+
+    match run_mp3gain_step(
+        job.id,
+        attempt_count,
+        &downloaded_path,
+        &mut normalized_path,
+    ) {
         Ok(()) => {}
         Err(err) => {
             fail_job_with_step(job.id, JobStep::Mp3Gain, err)?;
@@ -765,14 +772,14 @@ fn process_claimed_job(job: &Job) -> MyRes<()> {
         }
     }
 
-    let adjusted_path = match run_ffmpeg_adjust_step(job.id, attempt_count, &temp_dir, &normalized_path)
-    {
-        Ok(path) => path,
-        Err(err) => {
-            fail_job_with_step(job.id, JobStep::FfmpegAdjust, err)?;
-            return Ok(());
-        }
-    };
+    let adjusted_path =
+        match run_ffmpeg_adjust_step(job.id, attempt_count, &temp_dir, &normalized_path) {
+            Ok(path) => path,
+            Err(err) => {
+                fail_job_with_step(job.id, JobStep::FfmpegAdjust, err)?;
+                return Ok(());
+            }
+        };
 
     let renamed_path = match run_rename_step(job, attempt_count, &temp_dir, &adjusted_path) {
         Ok(path) => path,
@@ -799,7 +806,10 @@ fn process_claimed_job(job: &Job) -> MyRes<()> {
 
     match run_import_step(job.id, attempt_count) {
         Ok(song_id) => {
-            log_job_info(&format!("job {} completed with song_id {}", job.id, song_id));
+            log_job_info(&format!(
+                "job {} completed with song_id {}",
+                job.id, song_id
+            ));
         }
         Err(err) => {
             fail_job_with_step(job.id, JobStep::ImportDb, err)?;
@@ -870,18 +880,20 @@ fn run_downloading_step(
         attempt_count,
         "",
     )?;
+    log_job_info(&format!("job {} step downloading: start", job.id));
 
     if !downloaded_path.trim().is_empty() && Path::new(downloaded_path).exists() {
         delete_job_cookie_file_if_exists(job.id)?;
+        log_job_info(&format!(
+            "job {} step downloading: done (skipped, already downloaded)",
+            job.id
+        ));
         return Ok(());
     }
 
     run_ytdlp_download_for_job(job, temp_dir)?;
 
-    let resolved = temp_dir.join("downloaded.mp3");
-    if !resolved.exists() {
-        return Err(format!("yt-dlp finished but output is missing: {}", resolved.display()).into());
-    }
+    let resolved = find_downloaded_file_in_temp_dir(temp_dir)?;
 
     *downloaded_path = resolved.to_string_lossy().to_string();
     update_job_paths(
@@ -891,6 +903,7 @@ fn run_downloading_step(
         "",
         "",
     )?;
+    log_job_info(&format!("job {} step downloading: done", job.id));
     Ok(())
 }
 
@@ -902,9 +915,8 @@ fn run_ytdlp_download_for_job(job: &Job, temp_dir: &Path) -> MyRes<()> {
     let mut args = vec![
         "--no-warnings".to_string(),
         "--no-playlist".to_string(),
-        "--extract-audio".to_string(),
-        "--audio-format".to_string(),
-        "mp3".to_string(),
+        "--format".to_string(),
+        "bestaudio/best".to_string(),
         "--output".to_string(),
         template_path.to_string_lossy().to_string(),
     ];
@@ -935,6 +947,133 @@ fn run_ytdlp_download_for_job(job: &Job, temp_dir: &Path) -> MyRes<()> {
     Ok(())
 }
 
+/// Locates the downloaded media artifact produced by yt-dlp in the job temp directory.
+fn find_downloaded_file_in_temp_dir(temp_dir: &Path) -> MyRes<PathBuf> {
+    let entries = fs::read_dir(temp_dir)?;
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(filename) = path.file_name().and_then(|part| part.to_str()) else {
+            continue;
+        };
+
+        if !filename.starts_with("downloaded.") {
+            continue;
+        }
+
+        if filename.ends_with(".part") || filename.ends_with(".ytdl") {
+            continue;
+        }
+
+        candidates.push(path);
+    }
+
+    let preferred_mp3 = temp_dir.join("downloaded.mp3");
+    if preferred_mp3.exists() {
+        return Ok(preferred_mp3);
+    }
+
+    if candidates.is_empty() {
+        return Err(format!(
+            "yt-dlp finished but no downloaded file found in {}",
+            temp_dir.display()
+        )
+        .into());
+    }
+
+    candidates.sort();
+    Ok(candidates.swap_remove(0))
+}
+
+/// Ensures the downloaded artifact is mp3 so downstream processing can run reliably.
+fn run_ensure_mp3_step(
+    job_id: i32,
+    attempt_count: i32,
+    temp_dir: &Path,
+    downloaded_path: &mut String,
+) -> MyRes<()> {
+    update_job_stage(
+        job_id,
+        JobStatus::Running,
+        JobStep::EnsureMp3,
+        attempt_count,
+        "",
+    )?;
+    log_job_info(&format!("job {job_id} step ensure_mp3: start"));
+
+    if downloaded_path.trim().is_empty() {
+        return Err("downloaded_path is empty before ensure_mp3".into());
+    }
+
+    let source_path = Path::new(downloaded_path);
+    if !source_path.exists() {
+        return Err(format!("downloaded file missing before ensure_mp3: {downloaded_path}").into());
+    }
+
+    let extension = source_path
+        .extension()
+        .and_then(|part| part.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    if extension == "mp3" {
+        update_job_paths(
+            job_id,
+            temp_dir.to_str().unwrap_or_default(),
+            downloaded_path,
+            "",
+            "",
+        )?;
+        log_job_info(&format!("job {job_id} step ensure_mp3: done (already mp3)"));
+        return Ok(());
+    }
+
+    let converted_path = temp_dir.join("downloaded.mp3");
+    run_command_capture(
+        "ffmpeg",
+        &[
+            "-hide_banner",
+            "-y",
+            "-i",
+            downloaded_path,
+            "-vn",
+            "-codec:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            converted_path.to_str().unwrap_or_default(),
+        ],
+    )?;
+
+    if !converted_path.exists() {
+        return Err(format!(
+            "ffmpeg mp3 conversion output is missing: {}",
+            converted_path.display()
+        )
+        .into());
+    }
+
+    *downloaded_path = converted_path.to_string_lossy().to_string();
+    update_job_paths(
+        job_id,
+        temp_dir.to_str().unwrap_or_default(),
+        downloaded_path,
+        "",
+        "",
+    )?;
+    log_job_info(&format!(
+        "job {job_id} step ensure_mp3: done (converted to mp3)"
+    ));
+
+    Ok(())
+}
+
 /// Runs mp3gain normalization and updates normalized path metadata.
 fn run_mp3gain_step(
     job_id: i32,
@@ -949,6 +1088,7 @@ fn run_mp3gain_step(
         attempt_count,
         "",
     )?;
+    log_job_info(&format!("job {job_id} step mp3gain: start"));
 
     if downloaded_path.trim().is_empty() {
         return Err("downloaded_path is empty before mp3gain".into());
@@ -969,6 +1109,7 @@ fn run_mp3gain_step(
         normalized_path,
         "",
     )?;
+    log_job_info(&format!("job {job_id} step mp3gain: done"));
     Ok(())
 }
 
@@ -986,9 +1127,13 @@ fn run_ffmpeg_adjust_step(
         attempt_count,
         "",
     )?;
+    log_job_info(&format!("job {job_id} step ffmpeg_adjust: start"));
 
     let adjusted_path = temp_dir.join("adjusted.mp3");
     if adjusted_path.exists() {
+        log_job_info(&format!(
+            "job {job_id} step ffmpeg_adjust: done (skipped, already adjusted)"
+        ));
         return Ok(adjusted_path);
     }
 
@@ -1009,11 +1154,17 @@ fn run_ffmpeg_adjust_step(
         return Err(format!("ffmpeg output is missing: {}", adjusted_path.display()).into());
     }
 
+    log_job_info(&format!("job {job_id} step ffmpeg_adjust: done"));
     Ok(adjusted_path)
 }
 
 /// Renames the adjusted file in temp dir to a deterministic metadata-based filename.
-fn run_rename_step(job: &Job, attempt_count: i32, temp_dir: &Path, adjusted_path: &Path) -> MyRes<PathBuf> {
+fn run_rename_step(
+    job: &Job,
+    attempt_count: i32,
+    temp_dir: &Path,
+    adjusted_path: &Path,
+) -> MyRes<PathBuf> {
     update_job_stage(
         job.id,
         JobStatus::Running,
@@ -1021,6 +1172,7 @@ fn run_rename_step(job: &Job, attempt_count: i32, temp_dir: &Path, adjusted_path
         attempt_count,
         "",
     )?;
+    log_job_info(&format!("job {} step rename: start", job.id));
 
     let base_for_fallback = adjusted_path
         .file_stem()
@@ -1030,14 +1182,23 @@ fn run_rename_step(job: &Job, attempt_count: i32, temp_dir: &Path, adjusted_path
     let renamed_path = temp_dir.join(target_name);
 
     if renamed_path.exists() {
+        log_job_info(&format!(
+            "job {} step rename: done (skipped, already renamed)",
+            job.id
+        ));
         return Ok(renamed_path);
     }
 
     if !adjusted_path.exists() {
-        return Err(format!("adjusted file missing before rename: {}", adjusted_path.display()).into());
+        return Err(format!(
+            "adjusted file missing before rename: {}",
+            adjusted_path.display()
+        )
+        .into());
     }
 
     fs::rename(adjusted_path, &renamed_path)?;
+    log_job_info(&format!("job {} step rename: done", job.id));
     Ok(renamed_path)
 }
 
@@ -1057,8 +1218,13 @@ fn run_move_step(
         attempt_count,
         "",
     )?;
+    log_job_info(&format!("job {} step move_to_music_dir: start", job.id));
 
     if !final_path.trim().is_empty() && Path::new(final_path).exists() {
+        log_job_info(&format!(
+            "job {} step move_to_music_dir: done (skipped, already moved)",
+            job.id
+        ));
         return Ok(());
     }
 
@@ -1095,6 +1261,7 @@ fn run_move_step(
         normalized_path,
         final_path,
     )?;
+    log_job_info(&format!("job {} step move_to_music_dir: done", job.id));
 
     Ok(())
 }
@@ -1108,7 +1275,10 @@ fn run_import_step(job_id: i32, attempt_count: i32) -> MyRes<i32> {
         attempt_count,
         "",
     )?;
-    import_job_song(job_id)
+    log_job_info(&format!("job {job_id} step import_db: start"));
+    let song_id = import_job_song(job_id)?;
+    log_job_info(&format!("job {job_id} step import_db: done"));
+    Ok(song_id)
 }
 
 /// Marks a job as failed for one concrete state-machine step.
@@ -1187,7 +1357,9 @@ fn extract_cookie_payload(raw: Option<&str>) -> Option<String> {
 /// Validates cookie payload size to prevent oversized untrusted request bodies.
 fn validate_cookie_payload_len(cookie_text: &str) -> MyRes<()> {
     if cookie_text.len() > JOB_COOKIE_MAX_LEN {
-        return Err(format!("Cookie input exceeds maximum size of {JOB_COOKIE_MAX_LEN} bytes.").into());
+        return Err(
+            format!("Cookie input exceeds maximum size of {JOB_COOKIE_MAX_LEN} bytes.").into(),
+        );
     }
 
     Ok(())
@@ -1233,6 +1405,21 @@ fn delete_job_cookie_file_if_exists(job_id: i32) -> MyRes<()> {
     Ok(())
 }
 
+/// Deletes the per-job upload temp directory before the job is marked completed.
+fn delete_job_upload_dir_if_exists(job_id: i32) -> MyRes<()> {
+    let dir_path = get_upload_dir().join("jobs").join(job_id.to_string());
+    let result = fs::remove_dir_all(dir_path);
+    if let Err(err) = result {
+        if err.kind() == ErrorKind::NotFound {
+            return Ok(());
+        }
+
+        return Err(err.into());
+    }
+
+    Ok(())
+}
+
 /// Returns the configured music directory where final mp3 files are stored.
 fn get_music_dir() -> PathBuf {
     let env_value = env::var("MUSICDIR");
@@ -1246,7 +1433,11 @@ fn get_music_dir() -> PathBuf {
 fn sanitize_filename_part(value: &str) -> String {
     let mut output = String::new();
     for character in value.chars() {
-        if character.is_ascii_alphanumeric() || character == ' ' || character == '_' || character == '-' {
+        if character.is_ascii_alphanumeric()
+            || character == ' '
+            || character == '_'
+            || character == '-'
+        {
             output.push(character);
             continue;
         }
@@ -1338,8 +1529,8 @@ fn log_job_error(message: &str) {
 mod tests {
     use super::{
         cookie_file_path_for_job, extract_cookie_payload, is_job_cookie_filename,
-        sanitize_filename_part, validate_cookie_payload_len, JOB_COOKIE_MAX_LEN,
-        truncate_error_message,
+        sanitize_filename_part, truncate_error_message, validate_cookie_payload_len,
+        JOB_COOKIE_MAX_LEN,
     };
 
     #[test]

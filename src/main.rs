@@ -615,6 +615,7 @@ struct UpdateSongData {
     rating: u8,
 }
 
+/// Persists song metadata edits from the web UI after normalizing user-entered text fields.
 #[post("/songdata/{id}")]
 async fn net_update_songdata_by_id_post(
     id: web::Path<u32>,
@@ -623,11 +624,14 @@ async fn net_update_songdata_by_id_post(
     println!("net_songdata_by_id_post({id})");
     db_update()?;
     let d = data.into_inner();
+    let songname = d.songname.trim().to_owned();
+    let artist = d.artist.trim().to_owned();
+    let album = d.album.trim().to_owned();
     let id = id.into_inner();
 
     let sql = "UPDATE songs SET songname = ?, artist = ?, album = ?, rating = ? WHERE id = ?";
 
-    db_execute(sql, (&d.songname, &d.artist, &d.album, &d.rating, &id))?;
+    db_execute(sql, (&songname, &artist, &album, &d.rating, &id))?;
 
     Ok(format!("Updated song with ID: {id}"))
 }

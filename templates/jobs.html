@@ -22,11 +22,11 @@
         </div>
         <div>
             <label for="artist">Artist</label>
-            <input id="artist" name="artist" type="text" required>
+            <input id="artist" name="artist" type="text">
         </div>
         <div>
             <label for="album">Album</label>
-            <input id="album" name="album" type="text" required>
+            <input id="album" name="album" type="text">
         </div>
         <div>
             <label for="rating">Rating</label>
@@ -172,11 +172,15 @@
             event.preventDefault();
             const form = document.getElementById('create-job-form');
             const data = new FormData(form);
+            const url = String(data.get('url') ?? '').trim();
+            const songname = String(data.get('songname') ?? '').trim();
+            const artist = String(data.get('artist') ?? '').trim();
+            const album = String(data.get('album') ?? '').trim();
             const payload = {
-                url: data.get('url'),
-                songname: data.get('songname'),
-                artist: data.get('artist'),
-                album: data.get('album'),
+                url,
+                songname,
+                artist,
+                album,
                 rating: Number(data.get('rating')),
                 cookies: data.get('cookies'),
             };
