@@ -47,15 +47,15 @@ lazy_static! {
     static ref GL_INTERNAL_PORT: i16 = env::var("PORT_INTERNAL")
         .map(|v| v.parse::<i16>().unwrap_or(3001))
         .unwrap_or(3001);
-    static ref GL_MUSICDIR: PathBuf = env::var("MUSICDIR").and_then(|s| Ok(PathBuf::from(s))).unwrap_or(
+    static ref GL_MUSICDIR: PathBuf = env::var("MUSICDIR").map(PathBuf::from).unwrap_or(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("music")
     );
     // /music-srv/db/
-    static ref GL_DBDIR: PathBuf = env::var("DBDIR").and_then(|s| Ok(PathBuf::from(s))).unwrap_or(
+    static ref GL_DBDIR: PathBuf = env::var("DBDIR").map(PathBuf::from).unwrap_or(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     );
-    static ref GL_UPLOADDIR: PathBuf = env::var("UPLOADDIR").and_then(|s| Ok(PathBuf::from(s))).unwrap_or(
+    static ref GL_UPLOADDIR: PathBuf = env::var("UPLOADDIR").map(PathBuf::from).unwrap_or(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("music").join("upload")
     );
 }
@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
     println!("http://localhost:{}", *GL_PORT);
     println!("http://localhost:{}", *GL_INTERNAL_PORT);
     println!("MUSICDIR: {}", GL_MUSICDIR.to_str().unwrap_or_default());
+    let _job_worker_handle = dl::start_job_worker();
 
     let ext = web::Data::new(AppState {
         template_env: AutoReloader::new(|notifier| {
@@ -110,6 +111,7 @@ async fn main() -> Result<()> {
 
     let exposed_server_handle = HttpServer::new(move || {
         App::new()
+            .configure(dl::configure_routes)
             .service(net_songlist)
             .service(net_get_random_id)
             .service(net_get_random_id_with_scale)
@@ -128,6 +130,7 @@ async fn main() -> Result<()> {
 
     let exposed_server_handle_2 = HttpServer::new(move || {
         App::new()
+            .configure(dl::configure_routes)
             .service(net_update_files)
             .service(net_songlist)
             .service(net_get_random_id)
@@ -237,7 +240,7 @@ fn add_song_in_transaction(path: &str, filename: &str, s: &mut Statement) {
 
     if let Ok(tags) = audiotags::Tag::new()
         .with_tag_type(audiotags::TagType::Id3v2)
-        .read_from_path(&path)
+        .read_from_path(path)
     {
         songname = tags.title().unwrap_or_default().to_owned();
         artist = tags.artist().unwrap_or_default().to_owned();
@@ -248,7 +251,7 @@ fn add_song_in_transaction(path: &str, filename: &str, s: &mut Statement) {
         album = "".to_string();
     };
 
-    let seconds = get_songlength_secs(&path);
+    let seconds = get_songlength_secs(path);
     let length = format_songlength(seconds);
     let rating = GL_RATING_BASE;
     let vote = 0;
@@ -316,7 +319,7 @@ async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
         })
     });
 
-    let vec = vec?.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let vec = vec?.collect::<Result<Vec<_>, _>>()?;
 
     Ok(Json(vec))
 }
@@ -624,7 +627,7 @@ async fn net_update_songdata_by_id_post(
 
     let sql = "UPDATE songs SET songname = ?, artist = ?, album = ?, rating = ? WHERE id = ?";
 
-    db_execute(&sql, (&d.songname, &d.artist, &d.album, &d.rating, &id))?;
+    db_execute(sql, (&d.songname, &d.artist, &d.album, &d.rating, &id))?;
 
     Ok(format!("Updated song with ID: {id}"))
 }

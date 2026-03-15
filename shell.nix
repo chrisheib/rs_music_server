@@ -12,7 +12,9 @@ let
   };
 
   # 3. Now rust-bin is available
-  rust = pkgs.rust-bin.stable.latest.default;
+  rust = pkgs.rust-bin.stable.latest.default.override {
+    extensions = [ "rust-src" ];
+  };
 
   buildInputs = with pkgs; [
     autoAddDriverRunpath
@@ -34,8 +36,10 @@ pkgs.mkShell {
   RUSTFLAGS = "-C link-args=-Wl,--no-rosegment,-fuse-ld=mold,-rpath,${pkgs.lib.makeLibraryPath buildInputs}";
   shellHook = ''
     echo "Rust $(rustc --version)"
+    echo "Rust src: ${rust}/lib/rustlib/src/rust/library"
     echo "ffmpeg $(ffmpeg -version | sed -n "s/ffmpeg version \([-0-9.]*\).*/\1/p;")"
     unset TEMP TMP TEMPDIR TMPDIR
     export RUST_BACKTRACE=1
+    export RUST_SRC_PATH="${rust}/lib/rustlib/src/rust/library"
   '';
 }

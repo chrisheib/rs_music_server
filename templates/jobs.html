@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Download Jobs</title>
+</head>
+
+<body>
+    <div><a href="/">Back to Song List</a></div>
+    <h1>Download Jobs</h1>
+
+    <form id="create-job-form">
+        <div>
+            <label for="url">YouTube URL</label>
+            <input id="url" name="url" type="url" required>
+        </div>
+        <div>
+            <label for="songname">Song Name</label>
+            <input id="songname" name="songname" type="text" required>
+        </div>
+        <div>
+            <label for="artist">Artist</label>
+            <input id="artist" name="artist" type="text" required>
+        </div>
+        <div>
+            <label for="album">Album</label>
+            <input id="album" name="album" type="text" required>
+        </div>
+        <div>
+            <label for="rating">Rating</label>
+            <input id="rating" name="rating" type="number" min="0" max="10" value="2" required>
+        </div>
+        <div>
+            <label for="cookies">YouTube Cookies (Netscape format)</label>
+            <textarea id="cookies" name="cookies" rows="8" cols="80"
+                placeholder="# Netscape HTTP Cookie File"></textarea>
+        </div>
+        <div>
+            <button type="submit">Queue Job</button>
+        </div>
+    </form>
+
+    <p id="create-job-message"></p>
+    <div>
+        <button id="refresh-jobs-button" type="button" style="display: none;">Refresh</button>
+    </div>
+
+    <table border="1" cellpadding="4" cellspacing="0">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Queue Date</th>
+                <th>Status</th>
+                <th>Step</th>
+                <th>Song ID</th>
+                <th>Song Name</th>
+                <th>Artist</th>
+                <th>Album</th>
+                <th>Rating</th>
+                <th>URL</th>
+                <th>Error</th>
+            </tr>
+        </thead>
+        <tbody id="job-list-body"></tbody>
+    </table>
+
+    <script>
+        window.jobs = {{ jobs | tojson }};
+        window.lastKnownCompletedAt = null;
+
+        function renderJobs() {
+            const body = document.getElementById('job-list-body');
+            body.innerHTML = '';
+
+            for (const job of window.jobs) {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${job.id}</td>
+                    <td>${job.created_at}</td>
+                    <td>${job.status}</td>
+                    <td>${job.step}</td>
+                    <td>${job.song_id ?? ''}</td>
+                    <td>${job.songname}</td>
+                    <td>${job.artist}</td>
+                    <td>${job.album}</td>
+                    <td>${job.rating}</td>
+                    <td>${job.url}</td>
+                    <td>${job.error_message}</td>
+                `;
+                body.appendChild(row);
+            }
+        }
+
+        function maxCompletedAtFromJobs(jobs) {
+            let latest = null;
+            for (const job of jobs) {
+                if (!job.completed_at) {
+                    continue;
+                }
+                if (latest === null || job.completed_at > latest) {
+                    latest = job.completed_at;
+                }
+            }
+            return latest;
+        }
+
+        function updateLastKnownCompletedAt(candidate) {
+            if (!candidate) {
+                return;
+            }
+            if (!window.lastKnownCompletedAt || candidate > window.lastKnownCompletedAt) {
+                window.lastKnownCompletedAt = candidate;
+            }
+        }
+
+        function setRefreshButtonVisible(visible) {
+            const refreshButton = document.getElementById('refresh-jobs-button');
+            refreshButton.style.display = visible ? 'inline-block' : 'none';
+        }
+
+        async function fetchJobsAndRender() {
+            const response = await fetch('/jobs');
+            if (!response.ok) {
+                throw new Error(await response.text());
+            }
+
+            const jobs = await response.json();
+            window.jobs = jobs;
+            renderJobs();
+
+            const latestCompletedAt = maxCompletedAtFromJobs(jobs);
+            updateLastKnownCompletedAt(latestCompletedAt);
+            setRefreshButtonVisible(false);
+        }
+
+        async function pollLastCompletedAt() {
+            const response = await fetch('/jobs/last-completed-at');
+            if (!response.ok) {
+                return;
+            }
+
+            const body = await response.json();
+            if (!body.completed_at) {
+                return;
+            }
+
+            if (!window.lastKnownCompletedAt || body.completed_at > window.lastKnownCompletedAt) {
+                setRefreshButtonVisible(true);
+            }
+        }
+
+        async function createJob(event) {
+            event.preventDefault();
+            const form = document.getElementById('create-job-form');
+            const data = new FormData(form);
+            const payload = {
+                url: data.get('url'),
+                songname: data.get('songname'),
+                artist: data.get('artist'),
+                album: data.get('album'),
+                rating: Number(data.get('rating')),
+                cookies: data.get('cookies'),
+            };
+
+            const message = document.getElementById('create-job-message');
+            message.textContent = '';
+
+            const response = await fetch('/jobs', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+
+            if (!response.ok) {
+                message.textContent = `Failed to create job: ${await response.text()}`;
+                return;
+            }
+
+            message.textContent = 'Job queued successfully.';
+            form.reset();
+
+            try {
+                await fetchJobsAndRender();
+            } catch (error) {
+                message.textContent = `Job queued, but failed to refresh list: ${error}`;
+            }
+        }
+
+        async function refreshJobsNow() {
+            const message = document.getElementById('create-job-message');
+            try {
+                await fetchJobsAndRender();
+                message.textContent = 'Job list refreshed.';
+            } catch (error) {
+                message.textContent = `Failed to refresh jobs: ${error}`;
+            }
+        }
+
+        document.getElementById('create-job-form').addEventListener('submit', createJob);
+        document.getElementById('refresh-jobs-button').addEventListener('click', refreshJobsNow);
+
+        renderJobs();
+        updateLastKnownCompletedAt(maxCompletedAtFromJobs(window.jobs));
+        setInterval(pollLastCompletedAt, 4000);
+    </script>
+</body>
+
+</html>

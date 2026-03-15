@@ -28,7 +28,8 @@ pub fn db_update() -> MyRes<()> {
             match version.as_str() {
                 "2" => v2()?,
                 "3" => v3()?,
-                "4" => break,
+                "4" => v4()?,
+                "5" => break,
                 _ => Err(eyre!("Unbekannte Versionsnummer!"))?,
             }
         }
@@ -92,4 +93,40 @@ fn v3() -> MyRes<()> {
     db_execute("UPDATE songs SET rating = 6 WHERE rating = 3200", [])?;
     db_execute("UPDATE songs SET rating = 7 WHERE rating >= 6400", [])?;
     db_execute("UPDATE config SET value = '4' WHERE key LIKE 'version'", [])
+}
+
+fn v4() -> MyRes<()> {
+    db_execute(
+        "CREATE TABLE IF NOT EXISTS download_jobs (
+        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        url TEXT NOT NULL,
+        songname TEXT NOT NULL DEFAULT '',
+        artist TEXT NOT NULL DEFAULT '',
+        album TEXT NOT NULL DEFAULT '',
+        rating INTEGER NOT NULL DEFAULT 2,
+        status TEXT NOT NULL,
+        step TEXT NOT NULL,
+        step_index INTEGER NOT NULL DEFAULT 0,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        song_id INTEGER,
+        error_message TEXT NOT NULL DEFAULT '',
+        temp_dir TEXT NOT NULL DEFAULT '',
+        downloaded_path TEXT NOT NULL DEFAULT '',
+        normalized_path TEXT NOT NULL DEFAULT '',
+        final_path TEXT NOT NULL DEFAULT ''
+    );",
+        [],
+    )?;
+    db_execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_jobs_status_created_at ON download_jobs (status, created_at)",
+        [],
+    )?;
+    db_execute(
+        "CREATE INDEX IF NOT EXISTS idx_download_jobs_completed_at ON download_jobs (completed_at)",
+        [],
+    )?;
+    db_execute("UPDATE config SET value = '5' WHERE key LIKE 'version'", [])
 }
