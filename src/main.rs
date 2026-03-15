@@ -32,6 +32,7 @@ use walkdir::WalkDir;
 use crate::update_manager::db_update;
 
 mod db;
+mod dl;
 mod update_manager;
 
 type MyRes<T> = Result<T, Box<dyn std::error::Error>>;
@@ -91,6 +92,7 @@ impl AppState {
 async fn main() -> Result<()> {
     install()?;
     println!("http://localhost:{}", *GL_PORT);
+    println!("http://localhost:{}", *GL_INTERNAL_PORT);
     println!("MUSICDIR: {}", GL_MUSICDIR.to_str().unwrap_or_default());
 
     let ext = web::Data::new(AppState {
@@ -108,7 +110,6 @@ async fn main() -> Result<()> {
 
     let exposed_server_handle = HttpServer::new(move || {
         App::new()
-            .service(net_update_files)
             .service(net_songlist)
             .service(net_get_random_id)
             .service(net_get_random_id_with_scale)
@@ -122,8 +123,6 @@ async fn main() -> Result<()> {
             .service(net_ping)
             .app_data(ext1.clone())
     })
-    // .bind(format!(":{}", *GL_PORT))?
-    // .bind(format!("localhost:{}", *GL_PORT))?
     .bind(format!("0.0.0.0:{}", *GL_PORT))?
     .run();
 
@@ -141,14 +140,12 @@ async fn main() -> Result<()> {
             .service(net_songdata_pretty_by_id)
             .service(net_404)
             .service(net_ping)
-            .service(net_index)
+            // .service(net_index)
             .service(net_songlist_web)
             .service(net_upload)
             .service(net_update_songdata_by_id_post)
             .app_data(ext.clone())
     })
-    // .bind(format!(":{}", *GL_PORT))?
-    // .bind(format!("localhost:{}", *GL_PORT))?
     .bind(format!("0.0.0.0:{}", *GL_INTERNAL_PORT))?
     .run();
     println!(
@@ -161,16 +158,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-#[get("/")]
-async fn net_index(app: Data<AppState>) -> MyRes<HttpResponse> {
-    println!("net_index");
-    let ctx = context! (
-        title => "Hello World",
-        name =>  "World",
-    );
-    let rendered = app.render_template("index.html", ctx)?;
-    Ok(HttpResponse::Ok().body(rendered))
-}
+// #[get("/")]
+// async fn net_index(app: Data<AppState>) -> MyRes<HttpResponse> {
+//     println!("net_index");
+//     // let ctx = context! (
+//     // title => "Hello World",
+//     // name =>  "World",
+//     // );
+//     // let rendered = app.render_template("index.html", ctx)?;
+//     let rendered = app.render_template("songlist.html", context! {})?;
+//     Ok(HttpResponse::Ok().body(rendered))
+// }
 
 #[get("/ping")]
 async fn net_ping() -> MyRes<String> {
@@ -323,7 +321,7 @@ async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
     Ok(Json(vec))
 }
 
-#[get("/web/songs")]
+#[get("/")]
 async fn net_songlist_web(app: Data<AppState>) -> MyRes<HttpResponse> {
     println!("net_songlist_web");
     db_update()?;

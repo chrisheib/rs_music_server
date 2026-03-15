@@ -27,6 +27,7 @@ FROM debian:stable-slim AS runtime
 WORKDIR /music-srv
 COPY --from=builder /music-srv/target/release/music-srv-small ./music-srv
 COPY ./templates ./templates
+RUN apt-get update && apt-get install -y yt-dlp mp3gain
 
 LABEL org.opencontainers.image.source="https://github.com/chrisheib/rs_music_server"
 

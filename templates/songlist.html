@@ -41,7 +41,12 @@
 </head>
 
 <body>
-    <div><a href="/">Back</a></div>
+    <!-- <div><a href="/">Back</a></div> -->
+    <form action="/upload" method="post" enctype="multipart/form-data">
+        Upload:
+        <input type="file" name="file" accept=".mp3">
+        <button type="submit">Submit</button>
+    </form>
     <h1>Song List</h1>
     <div>
         <input type="text" id="player_song_id" onkeypress="if (event.code == 'Enter') changeSong()" />
