@@ -36,6 +36,7 @@
             <label for="cookies">YouTube Cookies (Netscape format)</label>
             <textarea id="cookies" name="cookies" rows="8" cols="80"
                 placeholder="# Netscape HTTP Cookie File"></textarea>
+            <p id="cookie-instructions" style="font-size: 0.85em; color: #555; margin-top: 4px;"></p>
         </div>
         <div>
             <button type="submit">Queue Job</button>
@@ -61,6 +62,7 @@
                 <th>Rating</th>
                 <th>URL</th>
                 <th>Error</th>
+                <th></th>
             </tr>
         </thead>
         <tbody id="job-list-body"></tbody>
@@ -76,6 +78,9 @@
 
             for (const job of window.jobs) {
                 const row = document.createElement('tr');
+                const retryCell = job.status === 'Failed'
+                    ? `<td><button type="button" onclick="retryJob(${job.id})">Retry</button></td>`
+                    : `<td></td>`;
                 row.innerHTML = `
                     <td>${job.id}</td>
                     <td>${job.created_at}</td>
@@ -88,9 +93,21 @@
                     <td>${job.rating}</td>
                     <td>${job.url}</td>
                     <td>${job.error_message}</td>
+                    ${retryCell}
                 `;
                 body.appendChild(row);
             }
+        }
+
+        function retryJob(jobId) {
+            const job = window.jobs.find(j => j.id === jobId);
+            if (!job) return;
+            document.getElementById('url').value = job.url;
+            document.getElementById('songname').value = job.songname;
+            document.getElementById('artist').value = job.artist;
+            document.getElementById('album').value = job.album;
+            document.getElementById('rating').value = job.rating;
+            document.getElementById('url').scrollIntoView({ behavior: 'smooth' });
         }
 
         function maxCompletedAtFromJobs(jobs) {
@@ -178,8 +195,10 @@
                 return;
             }
 
+            localStorage.setItem('cookies', payload.cookies);
             message.textContent = 'Job queued successfully.';
             form.reset();
+            document.getElementById('cookies').value = payload.cookies;
 
             try {
                 await fetchJobsAndRender();
@@ -200,6 +219,25 @@
 
         document.getElementById('create-job-form').addEventListener('submit', createJob);
         document.getElementById('refresh-jobs-button').addEventListener('click', refreshJobsNow);
+
+        const savedCookies = localStorage.getItem('cookies');
+        if (savedCookies) {
+            document.getElementById('cookies').value = savedCookies;
+        }
+
+        (function setCookieInstructions() {
+            const el = document.getElementById('cookie-instructions');
+            const ua = navigator.userAgent;
+            const isFirefox = ua.includes('Firefox');
+            const isChrome = !isFirefox && (ua.includes('Chrome') || ua.includes('Chromium'));
+            if (isChrome) {
+                el.innerHTML = 'Install the <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank">Get cookies.txt LOCALLY</a> extension, navigate to YouTube, click the extension icon, copy cookies in Netscape format, and paste them here.';
+            } else if (isFirefox) {
+                el.innerHTML = 'Install the <a href="https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/" target="_blank">cookies.txt</a> extension, navigate to YouTube, click the extension icon and choose &ldquo;Copy current site&rdquo;, then paste the copied cookies here.';
+            } else {
+                el.textContent = 'Navigate to YouTube in your browser, export cookies in Netscape format using a cookies.txt extension, and paste them here.';
+            }
+        })();
 
         renderJobs();
         updateLastKnownCompletedAt(maxCompletedAtFromJobs(window.jobs));
