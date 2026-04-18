@@ -748,81 +748,111 @@ fn process_claimed_job(job: &Job) -> MyRes<()> {
         &final_path,
     )?;
 
-    match run_downloading_step(job, attempt_count, &temp_dir, &mut downloaded_path) {
-        Ok(()) => {}
-        Err(err) => {
-            fail_job_with_step(job.id, JobStep::Downloading, err)?;
-            return Ok(());
-        }
+    if execute_or_fail_step(job.id, JobStep::Downloading, || {
+        run_downloading_step(job, attempt_count, &temp_dir, &mut downloaded_path)
+    })?
+    .is_none()
+    {
+        return Ok(());
     }
 
-    match run_ensure_mp3_step(job.id, attempt_count, &temp_dir, &mut downloaded_path) {
-        Ok(()) => {}
-        Err(err) => {
-            fail_job_with_step(job.id, JobStep::EnsureMp3, err)?;
-            return Ok(());
-        }
+    if execute_or_fail_step(job.id, JobStep::EnsureMp3, || {
+        run_ensure_mp3_step(job.id, attempt_count, &temp_dir, &mut downloaded_path)
+    })?
+    .is_none()
+    {
+        return Ok(());
     }
 
-    match run_mp3gain_step(
-        job.id,
-        attempt_count,
-        &downloaded_path,
-        &mut normalized_path,
-    ) {
-        Ok(()) => {}
-        Err(err) => {
-            fail_job_with_step(job.id, JobStep::Mp3Gain, err)?;
-            return Ok(());
-        }
+    if execute_or_fail_step(job.id, JobStep::Mp3Gain, || {
+        run_mp3gain_step(
+            job.id,
+            attempt_count,
+            &downloaded_path,
+            &mut normalized_path,
+        )
+    })?
+    .is_none()
+    {
+        return Ok(());
     }
 
-    let adjusted_path =
-        match run_ffmpeg_adjust_step(job.id, attempt_count, &temp_dir, &normalized_path) {
-            Ok(path) => path,
-            Err(err) => {
-                fail_job_with_step(job.id, JobStep::FfmpegAdjust, err)?;
-                return Ok(());
-            }
-        };
-
-    let renamed_path = match run_rename_step(job, attempt_count, &temp_dir, &adjusted_path) {
-        Ok(path) => path,
-        Err(err) => {
-            fail_job_with_step(job.id, JobStep::Rename, err)?;
-            return Ok(());
-        }
+    let Some(adjusted_path) = execute_or_fail_step(job.id, JobStep::FfmpegAdjust, || {
+        run_ffmpeg_adjust_step(job.id, attempt_count, &temp_dir, &normalized_path)
+    })?
+    else {
+        return Ok(());
     };
 
-    match run_move_step(
-        job,
-        attempt_count,
-        &renamed_path,
-        &downloaded_path,
-        &normalized_path,
-        &mut final_path,
-    ) {
-        Ok(()) => {}
-        Err(err) => {
-            fail_job_with_step(job.id, JobStep::MoveToMusicDir, err)?;
-            return Ok(());
-        }
+    let Some(renamed_path) = execute_or_fail_step(job.id, JobStep::Rename, || {
+        run_rename_step(job, attempt_count, &temp_dir, &adjusted_path)
+    })?
+    else {
+        return Ok(());
+    };
+
+    if execute_or_fail_step(job.id, JobStep::MoveToMusicDir, || {
+        run_move_step(
+            job,
+            attempt_count,
+            &renamed_path,
+            &downloaded_path,
+            &normalized_path,
+            &mut final_path,
+        )
+    })?
+    .is_none()
+    {
+        return Ok(());
     }
 
-    match run_import_step(job.id, attempt_count) {
-        Ok(song_id) => {
-            log_job_info(&format!(
-                "job {} completed with song_id {}",
-                job.id, song_id
-            ));
-        }
-        Err(err) => {
-            fail_job_with_step(job.id, JobStep::ImportDb, err)?;
-            return Ok(());
-        }
-    }
+    let Some(song_id) = execute_or_fail_step(job.id, JobStep::ImportDb, || {
+        run_import_step(job.id, attempt_count)
+    })?
+    else {
+        return Ok(());
+    };
+
+    log_job_info(&format!(
+        "job {} completed with song_id {}",
+        job.id, song_id
+    ));
 
     Ok(())
+}
+
+/// Runs one job state-machine step and marks the job failed when the step returns an error.
+fn execute_or_fail_step<T, F>(job_id: i32, step: JobStep, action: F) -> MyRes<Option<T>>
+where
+    F: FnOnce() -> MyRes<T>,
+{
+    match action() {
+        Ok(value) => Ok(Some(value)),
+        Err(err) => {
+            fail_job_with_step(job_id, step, err)?;
+            Ok(None)
+        }
+    }
+}
+
+/// Persists step transition to running and emits standardized start logging.
+fn start_step(job_id: i32, attempt_count: i32, step: JobStep) -> MyRes<()> {
+    update_job_stage(job_id, JobStatus::Running, step, attempt_count, "")?;
+    log_job_info(&format!("job {job_id} step {}: start", step.as_db_str()));
+    Ok(())
+}
+
+/// Emits standardized step completion logging.
+fn finish_step(job_id: i32, step: JobStep) {
+    log_job_info(&format!("job {job_id} step {}: done", step.as_db_str()));
+}
+
+/// Emits standardized step completion logging with additional context.
+fn finish_step_with_note(job_id: i32, step: JobStep, note: &str) {
+    log_job_info(&format!(
+        "job {job_id} step {}: done ({note})",
+        step.as_db_str()
+    ));
 }
 
 /// Removes stale per-job cookie files from previous runs before processing new jobs.
@@ -878,21 +908,11 @@ fn run_downloading_step(
     temp_dir: &Path,
     downloaded_path: &mut String,
 ) -> MyRes<()> {
-    update_job_stage(
-        job.id,
-        JobStatus::Running,
-        JobStep::Downloading,
-        attempt_count,
-        "",
-    )?;
-    log_job_info(&format!("job {} step downloading: start", job.id));
+    start_step(job.id, attempt_count, JobStep::Downloading)?;
 
     if !downloaded_path.trim().is_empty() && Path::new(downloaded_path).exists() {
         delete_job_cookie_file_if_exists(job.id)?;
-        log_job_info(&format!(
-            "job {} step downloading: done (skipped, already downloaded)",
-            job.id
-        ));
+        finish_step_with_note(job.id, JobStep::Downloading, "skipped, already downloaded");
         return Ok(());
     }
 
@@ -908,7 +928,7 @@ fn run_downloading_step(
         "",
         "",
     )?;
-    log_job_info(&format!("job {} step downloading: done", job.id));
+    finish_step(job.id, JobStep::Downloading);
     Ok(())
 }
 
@@ -1054,14 +1074,7 @@ fn run_ensure_mp3_step(
     temp_dir: &Path,
     downloaded_path: &mut String,
 ) -> MyRes<()> {
-    update_job_stage(
-        job_id,
-        JobStatus::Running,
-        JobStep::EnsureMp3,
-        attempt_count,
-        "",
-    )?;
-    log_job_info(&format!("job {job_id} step ensure_mp3: start"));
+    start_step(job_id, attempt_count, JobStep::EnsureMp3)?;
 
     if downloaded_path.trim().is_empty() {
         return Err("downloaded_path is empty before ensure_mp3".into());
@@ -1086,7 +1099,7 @@ fn run_ensure_mp3_step(
             "",
             "",
         )?;
-        log_job_info(&format!("job {job_id} step ensure_mp3: done (already mp3)"));
+        finish_step_with_note(job_id, JobStep::EnsureMp3, "already mp3");
         return Ok(());
     }
 
@@ -1123,9 +1136,7 @@ fn run_ensure_mp3_step(
         "",
         "",
     )?;
-    log_job_info(&format!(
-        "job {job_id} step ensure_mp3: done (converted to mp3)"
-    ));
+    finish_step_with_note(job_id, JobStep::EnsureMp3, "converted to mp3");
 
     Ok(())
 }
@@ -1137,14 +1148,7 @@ fn run_mp3gain_step(
     downloaded_path: &str,
     normalized_path: &mut String,
 ) -> MyRes<()> {
-    update_job_stage(
-        job_id,
-        JobStatus::Running,
-        JobStep::Mp3Gain,
-        attempt_count,
-        "",
-    )?;
-    log_job_info(&format!("job {job_id} step mp3gain: start"));
+    start_step(job_id, attempt_count, JobStep::Mp3Gain)?;
 
     if downloaded_path.trim().is_empty() {
         return Err("downloaded_path is empty before mp3gain".into());
@@ -1165,7 +1169,7 @@ fn run_mp3gain_step(
         normalized_path,
         "",
     )?;
-    log_job_info(&format!("job {job_id} step mp3gain: done"));
+    finish_step(job_id, JobStep::Mp3Gain);
     Ok(())
 }
 
@@ -1176,20 +1180,11 @@ fn run_ffmpeg_adjust_step(
     temp_dir: &Path,
     normalized_path: &str,
 ) -> MyRes<PathBuf> {
-    update_job_stage(
-        job_id,
-        JobStatus::Running,
-        JobStep::FfmpegAdjust,
-        attempt_count,
-        "",
-    )?;
-    log_job_info(&format!("job {job_id} step ffmpeg_adjust: start"));
+    start_step(job_id, attempt_count, JobStep::FfmpegAdjust)?;
 
     let adjusted_path = temp_dir.join("adjusted.mp3");
     if adjusted_path.exists() {
-        log_job_info(&format!(
-            "job {job_id} step ffmpeg_adjust: done (skipped, already adjusted)"
-        ));
+        finish_step_with_note(job_id, JobStep::FfmpegAdjust, "skipped, already adjusted");
         return Ok(adjusted_path);
     }
 
@@ -1210,7 +1205,7 @@ fn run_ffmpeg_adjust_step(
         return Err(format!("ffmpeg output is missing: {}", adjusted_path.display()).into());
     }
 
-    log_job_info(&format!("job {job_id} step ffmpeg_adjust: done"));
+    finish_step(job_id, JobStep::FfmpegAdjust);
     Ok(adjusted_path)
 }
 
@@ -1221,14 +1216,7 @@ fn run_rename_step(
     temp_dir: &Path,
     adjusted_path: &Path,
 ) -> MyRes<PathBuf> {
-    update_job_stage(
-        job.id,
-        JobStatus::Running,
-        JobStep::Rename,
-        attempt_count,
-        "",
-    )?;
-    log_job_info(&format!("job {} step rename: start", job.id));
+    start_step(job.id, attempt_count, JobStep::Rename)?;
 
     let base_for_fallback = adjusted_path
         .file_stem()
@@ -1238,10 +1226,7 @@ fn run_rename_step(
     let renamed_path = temp_dir.join(target_name);
 
     if renamed_path.exists() {
-        log_job_info(&format!(
-            "job {} step rename: done (skipped, already renamed)",
-            job.id
-        ));
+        finish_step_with_note(job.id, JobStep::Rename, "skipped, already renamed");
         return Ok(renamed_path);
     }
 
@@ -1254,7 +1239,7 @@ fn run_rename_step(
     }
 
     fs::rename(adjusted_path, &renamed_path)?;
-    log_job_info(&format!("job {} step rename: done", job.id));
+    finish_step(job.id, JobStep::Rename);
     Ok(renamed_path)
 }
 
@@ -1267,20 +1252,10 @@ fn run_move_step(
     normalized_path: &str,
     final_path: &mut String,
 ) -> MyRes<()> {
-    update_job_stage(
-        job.id,
-        JobStatus::Running,
-        JobStep::MoveToMusicDir,
-        attempt_count,
-        "",
-    )?;
-    log_job_info(&format!("job {} step move_to_music_dir: start", job.id));
+    start_step(job.id, attempt_count, JobStep::MoveToMusicDir)?;
 
     if !final_path.trim().is_empty() && Path::new(final_path).exists() {
-        log_job_info(&format!(
-            "job {} step move_to_music_dir: done (skipped, already moved)",
-            job.id
-        ));
+        finish_step_with_note(job.id, JobStep::MoveToMusicDir, "skipped, already moved");
         return Ok(());
     }
 
@@ -1317,23 +1292,16 @@ fn run_move_step(
         normalized_path,
         final_path,
     )?;
-    log_job_info(&format!("job {} step move_to_music_dir: done", job.id));
+    finish_step(job.id, JobStep::MoveToMusicDir);
 
     Ok(())
 }
 
 /// Imports final file into songs DB and returns song id.
 fn run_import_step(job_id: i32, attempt_count: i32) -> MyRes<i32> {
-    update_job_stage(
-        job_id,
-        JobStatus::Running,
-        JobStep::ImportDb,
-        attempt_count,
-        "",
-    )?;
-    log_job_info(&format!("job {job_id} step import_db: start"));
+    start_step(job_id, attempt_count, JobStep::ImportDb)?;
     let song_id = import_job_song(job_id)?;
-    log_job_info(&format!("job {job_id} step import_db: done"));
+    finish_step(job_id, JobStep::ImportDb);
     Ok(song_id)
 }
 
