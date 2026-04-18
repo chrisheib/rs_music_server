@@ -5,11 +5,33 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Download Jobs</title>
+    <style>
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 16px;
+        }
+
+        .build-timestamp {
+            font-size: 0.85em;
+            color: #555;
+            text-align: right;
+            white-space: nowrap;
+        }
+    </style>
 </head>
 
 <body>
-    <div><a href="/">Back to Song List</a></div>
-    <h1>Download Jobs</h1>
+    <div class="page-header">
+        <div>
+            <div><a href="/">Back to Song List</a></div>
+            <h1>Download Jobs</h1>
+        </div>
+        {% if build_timestamp %}
+        <div class="build-timestamp">Build: {{ build_timestamp }}</div>
+        {% endif %}
+    </div>
 
     <form id="create-job-form">
         <div>

@@ -28,7 +28,9 @@ RUN apt-get update && apt-get install -y yt-dlp mp3gain ffmpeg
 WORKDIR /music-srv
 COPY --from=builder /music-srv/target/release/music-srv-small ./music-srv
 COPY ./templates ./templates
+ARG BUILD_TIMESTAMP=dev
 
 LABEL org.opencontainers.image.source="https://github.com/chrisheib/rs_music_server"
+RUN printf '%s\n' "$BUILD_TIMESTAMP" > ./build-timestamp.txt
 
 CMD ["./music-srv"]

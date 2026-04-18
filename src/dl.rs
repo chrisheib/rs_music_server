@@ -33,6 +33,8 @@ const JOB_ERROR_MAX_LEN: usize = 1000;
 const JOB_POLL_INTERVAL_SECS: u64 = 3;
 const JOB_COOKIE_MAX_LEN: usize = 128 * 1024;
 const FFMPEG_COMPAND_FILTER: &str = "compand=attacks=0.1:decays=0.1:soft-knee=5:points=-120/-120|-80/-80|-60/-40|-40/-20|-20/-15|0/-1|10/-1";
+const YTDLP_FORMAT_SELECTORS: [Option<&str>; 3] = [Some("bestaudio/best"), Some("best"), None];
+const YTDLP_YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=default,-tv,-tv_downgraded";
 
 /// Website with joblist
 #[get("/web/jobs")]
@@ -40,7 +42,10 @@ pub async fn net_jobs_web(app: Data<AppState>) -> MyRes<HttpResponse> {
     log_job_info("rendering jobs page");
     db_update()?;
     let jobs = read_jobs_db()?;
-    let rendered = app.render_template("jobs.html", context! {jobs => &jobs})?;
+    let rendered = app.render_template(
+        "jobs.html",
+        context! {jobs => &jobs, build_timestamp => app.build_timestamp()},
+    )?;
     Ok(HttpResponse::Ok().body(rendered))
 }
 
@@ -911,29 +916,49 @@ fn run_downloading_step(
 fn run_ytdlp_download_for_job(job: &Job, temp_dir: &Path) -> MyRes<()> {
     let template_path = temp_dir.join("downloaded.%(ext)s");
     let cookie_path = cookie_file_path_for_job(job.id);
+    let output_template = template_path.to_string_lossy().to_string();
+    let cookie_arg = cookie_path.exists().then_some(cookie_path.as_path());
+    let mut command_error: Option<String> = None;
 
-    let mut args = vec![
-        "--no-warnings".to_string(),
-        "--no-playlist".to_string(),
-        "--format".to_string(),
-        "bestaudio/best".to_string(),
-        "--output".to_string(),
-        template_path.to_string_lossy().to_string(),
-    ];
+    for format_selector in YTDLP_FORMAT_SELECTORS {
+        let args = build_ytdlp_download_args(
+            job.url.trim(),
+            &output_template,
+            cookie_arg,
+            format_selector,
+        );
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    if cookie_path.exists() {
-        args.push("--cookies".to_string());
-        args.push(cookie_path.to_string_lossy().to_string());
+        match run_command_capture_detailed("yt-dlp", &arg_refs) {
+            Ok(()) => {
+                command_error = None;
+                break;
+            }
+            Err(error) => {
+                let should_retry =
+                    format_selector.is_some() && error.is_requested_format_unavailable();
+                let error_text = error.to_string();
+
+                if should_retry {
+                    let selector = format_selector.unwrap_or("default");
+                    log_job_info(&format!(
+                        "job {} yt-dlp selector '{}' unavailable, retrying with a broader fallback",
+                        job.id, selector
+                    ));
+                    command_error = Some(error_text);
+                    continue;
+                }
+
+                command_error = Some(error_text);
+                break;
+            }
+        }
     }
 
-    args.push(job.url.trim().to_string());
-
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let command_result = run_command_capture("yt-dlp", &arg_refs);
     let cleanup_result = delete_job_cookie_file_if_exists(job.id);
 
-    if let Err(command_err) = command_result {
-        let mut message = command_err.to_string();
+    if let Some(command_err) = command_error {
+        let mut message = command_err;
         if let Err(cleanup_err) = cleanup_result {
             message = format!("{message} | cookie cleanup failed: {cleanup_err}");
         }
@@ -945,6 +970,37 @@ fn run_ytdlp_download_for_job(job: &Job, temp_dir: &Path) -> MyRes<()> {
     }
 
     Ok(())
+}
+
+/// Builds yt-dlp download arguments for one attempt, optionally forcing a format selector.
+fn build_ytdlp_download_args(
+    url: &str,
+    output_template: &str,
+    cookie_path: Option<&Path>,
+    format_selector: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "--no-warnings".to_string(),
+        "--no-playlist".to_string(),
+        "--extractor-args".to_string(),
+        YTDLP_YOUTUBE_EXTRACTOR_ARGS.to_string(),
+    ];
+
+    if let Some(selector) = format_selector {
+        args.push("--format".to_string());
+        args.push(selector.to_string());
+    }
+
+    args.push("--output".to_string());
+    args.push(output_template.to_string());
+
+    if let Some(path) = cookie_path {
+        args.push("--cookies".to_string());
+        args.push(path.to_string_lossy().to_string());
+    }
+
+    args.push(url.to_string());
+    args
 }
 
 /// Locates the downloaded media artifact produced by yt-dlp in the job temp directory.
@@ -1291,26 +1347,83 @@ fn fail_job_with_step(job_id: i32, step: JobStep, error: Box<dyn std::error::Err
 
 /// Runs one external command and returns a rich error when it fails.
 fn run_command_capture(program: &str, args: &[&str]) -> MyRes<()> {
+    run_command_capture_detailed(program, args).map_err(|error| error.into())
+}
+
+/// Runs one external command and preserves stdout/stderr for targeted retry handling.
+fn run_command_capture_detailed(program: &str, args: &[&str]) -> Result<(), CommandFailure> {
     let mut command = Command::new(program);
     command.args(args);
-    let output = command.output()?;
+    let output = command.output().map_err(CommandFailure::from_io)?;
     if output.status.success() {
         return Ok(());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let formatted = format!(
-        "command failed: {} {} | status: {} | stdout: {} | stderr: {}",
+    Err(CommandFailure::from_process_output(
         program,
-        args.join(" "),
-        output.status,
-        stdout.trim(),
-        stderr.trim()
-    );
-
-    Err(truncate_error_message(&formatted).into())
+        args,
+        output.status.to_string(),
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
 }
+
+#[derive(Debug)]
+struct CommandFailure {
+    formatted: String,
+    stdout: String,
+    stderr: String,
+}
+
+impl CommandFailure {
+    /// Creates a command failure from a process exit result.
+    fn from_process_output(
+        program: &str,
+        args: &[&str],
+        status: String,
+        stdout: String,
+        stderr: String,
+    ) -> Self {
+        let formatted = format!(
+            "command failed: {} {} | status: {} | stdout: {} | stderr: {}",
+            program,
+            args.join(" "),
+            status,
+            stdout,
+            stderr
+        );
+
+        Self {
+            formatted: truncate_error_message(&formatted),
+            stdout,
+            stderr,
+        }
+    }
+
+    /// Creates a command failure from an I/O error before the process could run.
+    fn from_io(error: std::io::Error) -> Self {
+        let formatted = format!("command execution failed: {error}");
+        Self {
+            formatted: truncate_error_message(&formatted),
+            stdout: String::new(),
+            stderr: error.to_string(),
+        }
+    }
+
+    /// Reports whether yt-dlp rejected the requested format selector.
+    fn is_requested_format_unavailable(&self) -> bool {
+        self.stderr.contains("Requested format is not available")
+            || self.stdout.contains("Requested format is not available")
+    }
+}
+
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.formatted)
+    }
+}
+
+impl std::error::Error for CommandFailure {}
 
 /// Creates and returns deterministic temp dir for one queue job.
 fn ensure_temp_dir_for_job(job_id: i32) -> MyRes<PathBuf> {
@@ -1528,10 +1641,11 @@ fn log_job_error(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        cookie_file_path_for_job, extract_cookie_payload, is_job_cookie_filename,
-        sanitize_filename_part, truncate_error_message, validate_cookie_payload_len,
-        JOB_COOKIE_MAX_LEN,
+        build_ytdlp_download_args, cookie_file_path_for_job, extract_cookie_payload,
+        is_job_cookie_filename, sanitize_filename_part, truncate_error_message,
+        validate_cookie_payload_len, JOB_COOKIE_MAX_LEN,
     };
+    use std::path::Path;
 
     #[test]
     fn truncates_long_job_error_messages() {
@@ -1584,5 +1698,55 @@ mod tests {
         assert!(!is_job_cookie_filename("job-12.csv"));
         assert!(!is_job_cookie_filename("cookies.txt"));
         assert!(!is_job_cookie_filename("job-a.txt"));
+    }
+
+    #[test]
+    fn builds_ytdlp_args_with_format_and_cookies() {
+        let args = build_ytdlp_download_args(
+            "https://example.com/watch?v=1",
+            "/tmp/downloaded.%(ext)s",
+            Some(Path::new("/tmp/job-cookie.txt")),
+            Some("bestaudio/best"),
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "--no-warnings",
+                "--no-playlist",
+                "--extractor-args",
+                "youtube:player_client=default,-tv,-tv_downgraded",
+                "--format",
+                "bestaudio/best",
+                "--output",
+                "/tmp/downloaded.%(ext)s",
+                "--cookies",
+                "/tmp/job-cookie.txt",
+                "https://example.com/watch?v=1",
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_ytdlp_args_without_format_when_using_default_selector() {
+        let args = build_ytdlp_download_args(
+            "https://example.com/watch?v=1",
+            "/tmp/downloaded.%(ext)s",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "--no-warnings",
+                "--no-playlist",
+                "--extractor-args",
+                "youtube:player_client=default,-tv,-tv_downgraded",
+                "--output",
+                "/tmp/downloaded.%(ext)s",
+                "https://example.com/watch?v=1",
+            ]
+        );
     }
 }

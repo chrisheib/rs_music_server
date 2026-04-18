@@ -21,7 +21,12 @@ use minijinja_autoreload::AutoReloader;
 use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
 use rusqlite::Statement;
 use serde::{Deserialize, Serialize};
-use std::{env, fs::File, io::Write, path::PathBuf};
+use std::{
+    env,
+    fs::{self, File},
+    io::Write,
+    path::PathBuf,
+};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -74,9 +79,11 @@ const GL_RATING_BASE: i32 = 2i32;
 const GL_DEFAULT_RATING_SCALE: f32 = 2.5f32;
 const GL_DEBUG_SIZE: bool = false;
 const GL_REPLAY_PROTECTION: usize = 15;
+const BUILD_TIMESTAMP_FILENAME: &str = "build-timestamp.txt";
 
 struct AppState {
     template_env: AutoReloader,
+    build_timestamp: String,
 }
 
 impl AppState {
@@ -85,6 +92,28 @@ impl AppState {
         let template = env.get_template(name)?;
         let rendered = template.render(ctx)?;
         Ok(rendered)
+    }
+
+    /// Returns the build timestamp shown in templates so deployments can be verified in the UI.
+    fn build_timestamp(&self) -> &str {
+        &self.build_timestamp
+    }
+}
+
+/// Loads the image build timestamp so the web UI can expose which deployment is serving requests.
+fn load_build_timestamp() -> String {
+    let build_timestamp_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(BUILD_TIMESTAMP_FILENAME);
+
+    match fs::read_to_string(build_timestamp_path) {
+        Ok(content) => {
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                return "dev".to_string();
+            }
+            trimmed.to_string()
+        }
+        Err(_) => "dev".to_string(),
     }
 }
 
@@ -95,6 +124,7 @@ async fn main() -> Result<()> {
     println!("http://localhost:{}", *GL_INTERNAL_PORT);
     println!("MUSICDIR: {}", GL_MUSICDIR.to_str().unwrap_or_default());
     let _job_worker_handle = dl::start_job_worker();
+    let build_timestamp = load_build_timestamp();
 
     let ext = web::Data::new(AppState {
         template_env: AutoReloader::new(|notifier| {
@@ -105,6 +135,7 @@ async fn main() -> Result<()> {
             notifier.watch_path(&template_path, true);
             Ok(env)
         }),
+        build_timestamp,
     });
 
     let ext1 = ext.clone();
