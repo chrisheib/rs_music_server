@@ -7,5 +7,10 @@
     },
     "emmet.includeLanguages": {
         "jinja-html": "html"
+    },
+    "chat.tools.terminal.autoApprove": {
+        "cargo build": true,
+        "git diff": true,
+        "sed": true
     }
 }

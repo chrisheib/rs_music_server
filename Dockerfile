@@ -24,7 +24,10 @@ RUN objcopy --compress-debug-sections ./target/release/music-srv ./target/releas
 
 
 FROM debian:stable-slim AS runtime
-RUN apt-get update && apt-get install -y yt-dlp mp3gain ffmpeg
+RUN apt-get update && apt-get install -y mp3gain ffmpeg python3-pip && rm -rf /var/lib/apt/lists/*
+ENV DENO_INSTALL=/usr/local
+RUN curl -fsSL https://deno.land | sh
+RUN pip3 install --root-user-action=ignore --break-system-packages --upgrade "yt-dlp[default]"
 WORKDIR /music-srv
 COPY --from=builder /music-srv/target/release/music-srv-small ./music-srv
 COPY ./templates ./templates
@@ -34,3 +37,4 @@ LABEL org.opencontainers.image.source="https://github.com/chrisheib/rs_music_ser
 RUN printf '%s\n' "$BUILD_TIMESTAMP" > ./build-timestamp.txt
 
 CMD ["./music-srv"]
+

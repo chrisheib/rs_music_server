@@ -35,6 +35,13 @@ const JOB_COOKIE_MAX_LEN: usize = 128 * 1024;
 const FFMPEG_COMPAND_FILTER: &str = "compand=attacks=0.1:decays=0.1:soft-knee=5:points=-120/-120|-80/-80|-60/-40|-40/-20|-20/-15|0/-1|10/-1";
 const YTDLP_FORMAT_SELECTORS: [Option<&str>; 3] = [Some("bestaudio/best"), Some("best"), None];
 const YTDLP_YOUTUBE_EXTRACTOR_ARGS: &str = "youtube:player_client=default,-tv,-tv_downgraded";
+const YTDLP_YOUTUBE_EXTRACTOR_ARGS_WEB_ANDROID: &str =
+    "youtube:player_client=web,android,-tv,-tv_downgraded";
+const YTDLP_POLITE_SLEEP_REQUESTS: &str = "1.0";
+const YTDLP_POLITE_SLEEP_INTERVAL: &str = "1";
+const YTDLP_POLITE_MAX_SLEEP_INTERVAL: &str = "3";
+const YTDLP_POLITE_LIMIT_RATE: &str = "1M";
+const YTDLP_LIST_FORMATS_LOG_MAX_CHARS: usize = 3000;
 
 /// Website with joblist
 #[get("/web/jobs")]
@@ -493,7 +500,7 @@ pub async fn net_jobs_last_completed_at() -> MyRes<Json<LastCompletedAtResponse>
 pub async fn net_jobs_create(payload: Json<CreateJobRequest>) -> MyRes<Json<CreateJobResponse>> {
     db_update()?;
 
-    let request = payload.into_inner();
+    let mut request = payload.into_inner();
     let cookie_payload = extract_cookie_payload(request.cookies.as_deref());
 
     if request.url.trim().is_empty() {
@@ -507,6 +514,8 @@ pub async fn net_jobs_create(payload: Json<CreateJobRequest>) -> MyRes<Json<Crea
     if let Some(cookie_text) = cookie_payload.as_deref() {
         validate_cookie_payload_len(cookie_text)?;
     }
+
+    request.url = sanitize_job_url(&request.url);
 
     let inserted_id = create_job_db(&request)?;
     let inserted_id_i32 = i32::try_from(inserted_id)?;
@@ -591,6 +600,89 @@ fn sanitize_song_field(value: &str, fallback: &str) -> String {
     }
 
     fallback.trim().to_owned()
+}
+
+/// Normalizes incoming download URLs and strips non-essential YouTube tracking/list params.
+fn sanitize_job_url(raw_url: &str) -> String {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Some(video_id) = extract_youtube_video_id(trimmed) {
+        return format!("https://www.youtube.com/watch?v={video_id}");
+    }
+
+    trimmed.to_string()
+}
+
+/// Extracts a canonical YouTube video id from common watch/share URL variants.
+fn extract_youtube_video_id(url: &str) -> Option<String> {
+    if let Some(candidate) = query_param_value(url, "v") {
+        return normalize_youtube_video_id(candidate);
+    }
+
+    if let Some(path) = strip_prefix_case_insensitive(url, "https://youtu.be/")
+        .or_else(|| strip_prefix_case_insensitive(url, "http://youtu.be/"))
+    {
+        let segment = path.split(['?', '&', '#', '/']).next().unwrap_or_default();
+        return normalize_youtube_video_id(segment);
+    }
+
+    if let Some(path) = strip_prefix_case_insensitive(url, "https://www.youtube.com/shorts/")
+        .or_else(|| strip_prefix_case_insensitive(url, "http://www.youtube.com/shorts/"))
+        .or_else(|| strip_prefix_case_insensitive(url, "https://youtube.com/shorts/"))
+        .or_else(|| strip_prefix_case_insensitive(url, "http://youtube.com/shorts/"))
+    {
+        let segment = path.split(['?', '&', '#', '/']).next().unwrap_or_default();
+        return normalize_youtube_video_id(segment);
+    }
+
+    None
+}
+
+/// Returns query parameter value for a key when present in the URL.
+fn query_param_value<'a>(url: &'a str, key: &str) -> Option<&'a str> {
+    let query = url.split('?').nth(1)?;
+    let query = query.split('#').next().unwrap_or_default();
+
+    for part in query.split('&') {
+        let mut pieces = part.splitn(2, '=');
+        let current_key = pieces.next().unwrap_or_default();
+        let value = pieces.next().unwrap_or_default();
+        if current_key == key {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+/// Trims URL prefixes in a case-insensitive way and returns the remaining suffix.
+fn strip_prefix_case_insensitive<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    if value.len() < prefix.len() {
+        return None;
+    }
+
+    if value[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return Some(&value[prefix.len()..]);
+    }
+
+    None
+}
+
+/// Validates and cleans a probable YouTube video id.
+fn normalize_youtube_video_id(candidate: &str) -> Option<String> {
+    let sanitized: String = candidate
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .collect();
+
+    if sanitized.is_empty() {
+        return None;
+    }
+
+    Some(sanitized)
 }
 
 /// Clamps queue-provided rating values into the application's supported rating range.
@@ -938,42 +1030,41 @@ fn run_ytdlp_download_for_job(job: &Job, temp_dir: &Path) -> MyRes<()> {
     let cookie_path = cookie_file_path_for_job(job.id);
     let output_template = template_path.to_string_lossy().to_string();
     let cookie_arg = cookie_path.exists().then_some(cookie_path.as_path());
-    let mut command_error: Option<String> = None;
+    let command_error = match run_ytdlp_with_selector_fallback(
+        job.id,
+        job.url.trim(),
+        &output_template,
+        None,
+        true,
+        "guest-polite",
+    ) {
+        Ok(()) => None,
+        Err(guest_error) => {
+            if let Some(cookie_file) = cookie_arg {
+                log_job_info(&format!(
+                    "job {} guest-polite download failed, retrying in cookie mode",
+                    job.id
+                ));
 
-    for format_selector in YTDLP_FORMAT_SELECTORS {
-        let args = build_ytdlp_download_args(
-            job.url.trim(),
-            &output_template,
-            cookie_arg,
-            format_selector,
-        );
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-
-        match run_command_capture_detailed("yt-dlp", &arg_refs) {
-            Ok(()) => {
-                command_error = None;
-                break;
-            }
-            Err(error) => {
-                let should_retry =
-                    format_selector.is_some() && error.is_requested_format_unavailable();
-                let error_text = error.to_string();
-
-                if should_retry {
-                    let selector = format_selector.unwrap_or("default");
-                    log_job_info(&format!(
-                        "job {} yt-dlp selector '{}' unavailable, retrying with a broader fallback",
-                        job.id, selector
-                    ));
-                    command_error = Some(error_text);
-                    continue;
+                match run_ytdlp_with_selector_fallback(
+                    job.id,
+                    job.url.trim(),
+                    &output_template,
+                    Some(cookie_file),
+                    false,
+                    "cookie",
+                ) {
+                    Ok(()) => None,
+                    Err(cookie_error) => Some(format!(
+                        "guest-polite failed: {} | cookie fallback failed: {}",
+                        guest_error, cookie_error
+                    )),
                 }
-
-                command_error = Some(error_text);
-                break;
+            } else {
+                Some(guest_error.to_string())
             }
         }
-    }
+    };
 
     let cleanup_result = delete_job_cookie_file_if_exists(job.id);
 
@@ -992,19 +1083,253 @@ fn run_ytdlp_download_for_job(job: &Job, temp_dir: &Path) -> MyRes<()> {
     Ok(())
 }
 
-/// Builds yt-dlp download arguments for one attempt, optionally forcing a format selector.
-fn build_ytdlp_download_args(
+/// Runs one yt-dlp mode with selector fallbacks and optional dynamic format-id probing.
+fn run_ytdlp_with_selector_fallback(
+    job_id: i32,
+    url: &str,
+    output_template: &str,
+    cookie_path: Option<&Path>,
+    polite_mode: bool,
+    mode_name: &str,
+) -> MyRes<()> {
+    let extractor_profiles = [
+        ("none", None),
+        ("default", Some(YTDLP_YOUTUBE_EXTRACTOR_ARGS)),
+        (
+            "web-android",
+            Some(YTDLP_YOUTUBE_EXTRACTOR_ARGS_WEB_ANDROID),
+        ),
+    ];
+
+    let mut last_error_message = String::new();
+
+    for (profile_name, extractor_args) in extractor_profiles {
+        log_ytdlp_list_formats_once(
+            job_id,
+            url,
+            cookie_path,
+            polite_mode,
+            mode_name,
+            profile_name,
+            extractor_args,
+        );
+
+        let mut command_error: Option<String> = None;
+        let mut saw_requested_format_unavailable = false;
+
+        for format_selector in YTDLP_FORMAT_SELECTORS {
+            let args = build_ytdlp_download_args_with_mode(
+                url,
+                output_template,
+                cookie_path,
+                format_selector,
+                polite_mode,
+                extractor_args,
+            );
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+            match run_command_capture_detailed("yt-dlp", &arg_refs) {
+                Ok(()) => {
+                    return Ok(());
+                }
+                Err(error) => {
+                    let requested_format_unavailable = error.is_requested_format_unavailable();
+                    let should_retry_selector_fallback =
+                        format_selector.is_some() && requested_format_unavailable;
+                    let error_text = error.to_string();
+
+                    if requested_format_unavailable {
+                        saw_requested_format_unavailable = true;
+                    }
+
+                    if should_retry_selector_fallback {
+                        let selector = format_selector.unwrap_or("default");
+                        log_job_info(&format!(
+                            "job {} yt-dlp mode '{}' profile '{}' selector '{}' unavailable, retrying broader fallback",
+                            job_id, mode_name, profile_name, selector
+                        ));
+                        command_error = Some(error_text);
+                        continue;
+                    }
+
+                    command_error = Some(error_text);
+                    break;
+                }
+            }
+        }
+
+        if command_error.is_some() && saw_requested_format_unavailable {
+            match find_best_available_ytdlp_format_id(url, cookie_path, extractor_args) {
+                Ok(Some(format_id)) => {
+                    let args = build_ytdlp_download_args_with_mode(
+                        url,
+                        output_template,
+                        cookie_path,
+                        Some(format_id.as_str()),
+                        polite_mode,
+                        extractor_args,
+                    );
+                    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    log_job_info(&format!(
+                        "job {} mode '{}' profile '{}' retrying yt-dlp with discovered format id '{}'",
+                        job_id, mode_name, profile_name, format_id
+                    ));
+
+                    match run_command_capture_detailed("yt-dlp", &arg_refs) {
+                        Ok(()) => {
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            command_error = Some(error.to_string());
+                        }
+                    }
+                }
+                Ok(None) => {
+                    log_job_info(&format!(
+                        "job {} mode '{}' profile '{}' format probe found no viable id",
+                        job_id, mode_name, profile_name
+                    ));
+                }
+                Err(error) => {
+                    log_job_info(&format!(
+                        "job {} mode '{}' profile '{}' format probe failed: {}",
+                        job_id, mode_name, profile_name, error
+                    ));
+                }
+            }
+        }
+
+        if let Some(message) = command_error {
+            last_error_message = message;
+            log_job_info(&format!(
+                "job {} mode '{}' profile '{}' exhausted, trying next extractor profile",
+                job_id, mode_name, profile_name
+            ));
+        }
+    }
+
+    Err(last_error_message.into())
+}
+
+/// Executes one yt-dlp `--list-formats` preflight and logs compact output for diagnostics.
+fn log_ytdlp_list_formats_once(
+    job_id: i32,
+    url: &str,
+    cookie_path: Option<&Path>,
+    polite_mode: bool,
+    mode_name: &str,
+    profile_name: &str,
+    extractor_args: Option<&str>,
+) {
+    let mut args = build_ytdlp_download_args_with_mode(
+        url,
+        "/tmp/unused.%(ext)s",
+        cookie_path,
+        None,
+        polite_mode,
+        extractor_args,
+    );
+
+    args.retain(|arg| arg != "--output");
+    args.retain(|arg| arg != "/tmp/unused.%(ext)s");
+    args.push("--list-formats".to_string());
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let mut command = Command::new("yt-dlp");
+    command.args(&arg_refs);
+
+    match command.output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+            if output.status.success() {
+                if stdout.is_empty() {
+                    log_job_info(&format!(
+                        "job {} mode '{}' profile '{}' list-formats succeeded with empty output",
+                        job_id, mode_name, profile_name
+                    ));
+                } else {
+                    log_job_info(&format!(
+                        "job {} mode '{}' profile '{}' list-formats output:\n{}",
+                        job_id,
+                        mode_name,
+                        profile_name,
+                        truncate_log_text(&stdout, YTDLP_LIST_FORMATS_LOG_MAX_CHARS)
+                    ));
+                }
+                return;
+            }
+
+            let formatted = CommandFailure::from_process_output(
+                "yt-dlp",
+                &arg_refs,
+                output.status.to_string(),
+                stdout,
+                stderr,
+            );
+
+            log_job_info(&format!(
+                "job {} mode '{}' profile '{}' list-formats failed: {}",
+                job_id, mode_name, profile_name, formatted
+            ));
+        }
+        Err(error) => {
+            log_job_info(&format!(
+                "job {} mode '{}' profile '{}' list-formats execution failed: {}",
+                job_id, mode_name, profile_name, error
+            ));
+        }
+    }
+}
+
+fn truncate_log_text(source: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (index, character) in source.chars().enumerate() {
+        if index >= max_chars {
+            output.push_str("\n...<truncated>");
+            break;
+        }
+        output.push(character);
+    }
+    output
+}
+
+/// Builds yt-dlp download arguments for one attempt and one network behavior mode.
+fn build_ytdlp_download_args_with_mode(
     url: &str,
     output_template: &str,
     cookie_path: Option<&Path>,
     format_selector: Option<&str>,
+    polite_mode: bool,
+    extractor_args: Option<&str>,
 ) -> Vec<String> {
-    let mut args = vec![
-        "--no-warnings".to_string(),
-        "--no-playlist".to_string(),
-        "--extractor-args".to_string(),
-        YTDLP_YOUTUBE_EXTRACTOR_ARGS.to_string(),
-    ];
+    let mut args = vec!["--no-warnings".to_string(), "--no-playlist".to_string()];
+
+    if let Some(value) = extractor_args {
+        args.push("--extractor-args".to_string());
+        args.push(value.to_string());
+    }
+
+    if polite_mode {
+        args.push("--sleep-requests".to_string());
+        args.push(YTDLP_POLITE_SLEEP_REQUESTS.to_string());
+        args.push("--sleep-interval".to_string());
+        args.push(YTDLP_POLITE_SLEEP_INTERVAL.to_string());
+        args.push("--max-sleep-interval".to_string());
+        args.push(YTDLP_POLITE_MAX_SLEEP_INTERVAL.to_string());
+        args.push("--concurrent-fragments".to_string());
+        args.push("1".to_string());
+        args.push("--limit-rate".to_string());
+        args.push(YTDLP_POLITE_LIMIT_RATE.to_string());
+        args.push("--retries".to_string());
+        args.push("10".to_string());
+        args.push("--fragment-retries".to_string());
+        args.push("10".to_string());
+        args.push("--extractor-retries".to_string());
+        args.push("5".to_string());
+    }
 
     if let Some(selector) = format_selector {
         args.push("--format".to_string());
@@ -1021,6 +1346,148 @@ fn build_ytdlp_download_args(
 
     args.push(url.to_string());
     args
+}
+
+/// Queries yt-dlp JSON metadata and picks the best currently available format id.
+fn find_best_available_ytdlp_format_id(
+    url: &str,
+    cookie_path: Option<&Path>,
+    extractor_args: Option<&str>,
+) -> MyRes<Option<String>> {
+    let mut args = vec![
+        "--no-warnings".to_string(),
+        "--no-playlist".to_string(),
+        "--dump-single-json".to_string(),
+        "--no-download".to_string(),
+    ];
+
+    if let Some(value) = extractor_args {
+        args.push("--extractor-args".to_string());
+        args.push(value.to_string());
+    }
+
+    if let Some(path) = cookie_path {
+        args.push("--cookies".to_string());
+        args.push(path.to_string_lossy().to_string());
+    }
+
+    args.push(url.to_string());
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut command = Command::new("yt-dlp");
+    command.args(&arg_refs);
+    let output = command
+        .output()
+        .map_err(|error| format!("format probe command execution failed: {error}"))?;
+
+    if !output.status.success() {
+        return Err(CommandFailure::from_process_output(
+            "yt-dlp",
+            &arg_refs,
+            output.status.to_string(),
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        )
+        .to_string()
+        .into());
+    }
+
+    let payload = String::from_utf8_lossy(&output.stdout).to_string();
+    let parsed: YtdlpVideoMetadata = serde_json::from_str(&payload)
+        .map_err(|error| format!("failed to parse yt-dlp format probe JSON: {error}"))?;
+
+    Ok(select_best_format_id(&parsed.formats))
+}
+
+#[derive(Debug, Deserialize)]
+struct YtdlpVideoMetadata {
+    #[serde(default)]
+    formats: Vec<YtdlpFormatEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YtdlpFormatEntry {
+    format_id: String,
+    #[serde(default)]
+    ext: String,
+    #[serde(default)]
+    acodec: String,
+    #[serde(default)]
+    vcodec: String,
+    height: Option<i32>,
+    tbr: Option<f64>,
+    abr: Option<f64>,
+}
+
+/// Picks a stable best-effort format id for audio-first mp3 conversion.
+fn select_best_format_id(formats: &[YtdlpFormatEntry]) -> Option<String> {
+    pick_best_format_id(formats, |format| {
+        has_audio_codec(format)
+            && !has_video_codec(format)
+            && is_likely_mp3_convertible_audio_format(format)
+    })
+    .or_else(|| {
+        pick_best_format_id(formats, |format| {
+            has_audio_codec(format) && is_likely_mp3_convertible_audio_format(format)
+        })
+    })
+    .or_else(|| {
+        pick_best_format_id(formats, |format| {
+            has_audio_codec(format) && !has_video_codec(format)
+        })
+    })
+    .or_else(|| pick_best_format_id(formats, has_audio_codec))
+}
+
+fn pick_best_format_id<P>(formats: &[YtdlpFormatEntry], predicate: P) -> Option<String>
+where
+    P: Fn(&YtdlpFormatEntry) -> bool,
+{
+    formats
+        .iter()
+        .filter(|format| !format.format_id.is_empty())
+        .filter(|format| predicate(format))
+        .max_by(|left, right| score_format(left).cmp(&score_format(right)))
+        .map(|format| format.format_id.clone())
+}
+
+fn has_audio_codec(format: &YtdlpFormatEntry) -> bool {
+    !format.acodec.is_empty() && format.acodec != "none"
+}
+
+fn has_video_codec(format: &YtdlpFormatEntry) -> bool {
+    !format.vcodec.is_empty() && format.vcodec != "none"
+}
+
+/// Approximates whether ffmpeg can reasonably transcode this source to mp3.
+fn is_likely_mp3_convertible_audio_format(format: &YtdlpFormatEntry) -> bool {
+    let ext = format.ext.as_str();
+    let codec = format.acodec.as_str();
+
+    if matches!(ext, "m4a" | "mp3" | "webm" | "ogg" | "opus" | "aac") {
+        return has_audio_codec(format);
+    }
+
+    matches!(
+        codec,
+        "mp4a.40.2" | "mp4a" | "aac" | "opus" | "vorbis" | "mp3"
+    )
+}
+
+fn score_format(format: &YtdlpFormatEntry) -> i64 {
+    let abr = format.abr.unwrap_or(0.0).round() as i64;
+    let tbr = format.tbr.unwrap_or(0.0).round() as i64;
+    let height = i64::from(format.height.unwrap_or(0));
+    let video_penalty = if has_video_codec(format) {
+        -1_000_000
+    } else {
+        0
+    };
+    let container_bonus = match format.ext.as_str() {
+        "m4a" | "mp3" | "webm" | "ogg" | "opus" | "aac" => 1_000,
+        _ => 0,
+    };
+    (abr * 1_000) + (tbr * 10) + height + container_bonus + video_penalty
 }
 
 /// Locates the downloaded media artifact produced by yt-dlp in the job temp directory.
@@ -1609,11 +2076,35 @@ fn log_job_error(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_ytdlp_download_args, cookie_file_path_for_job, extract_cookie_payload,
-        is_job_cookie_filename, sanitize_filename_part, truncate_error_message,
-        validate_cookie_payload_len, JOB_COOKIE_MAX_LEN,
+        build_ytdlp_download_args_with_mode, cookie_file_path_for_job, extract_cookie_payload,
+        is_job_cookie_filename, sanitize_filename_part, sanitize_job_url, select_best_format_id,
+        truncate_error_message, validate_cookie_payload_len, JOB_COOKIE_MAX_LEN,
+        YTDLP_YOUTUBE_EXTRACTOR_ARGS,
     };
     use std::path::Path;
+
+    #[derive(Debug)]
+    struct FormatSeed<'a> {
+        id: &'a str,
+        ext: &'a str,
+        acodec: &'a str,
+        vcodec: &'a str,
+        height: Option<i32>,
+        tbr: Option<f64>,
+        abr: Option<f64>,
+    }
+
+    fn seed_format(seed: FormatSeed<'_>) -> super::YtdlpFormatEntry {
+        super::YtdlpFormatEntry {
+            format_id: seed.id.to_string(),
+            ext: seed.ext.to_string(),
+            acodec: seed.acodec.to_string(),
+            vcodec: seed.vcodec.to_string(),
+            height: seed.height,
+            tbr: seed.tbr,
+            abr: seed.abr,
+        }
+    }
 
     #[test]
     fn truncates_long_job_error_messages() {
@@ -1670,11 +2161,13 @@ mod tests {
 
     #[test]
     fn builds_ytdlp_args_with_format_and_cookies() {
-        let args = build_ytdlp_download_args(
+        let args = build_ytdlp_download_args_with_mode(
             "https://example.com/watch?v=1",
             "/tmp/downloaded.%(ext)s",
             Some(Path::new("/tmp/job-cookie.txt")),
             Some("bestaudio/best"),
+            false,
+            Some(YTDLP_YOUTUBE_EXTRACTOR_ARGS),
         );
 
         assert_eq!(
@@ -1697,11 +2190,13 @@ mod tests {
 
     #[test]
     fn builds_ytdlp_args_without_format_when_using_default_selector() {
-        let args = build_ytdlp_download_args(
+        let args = build_ytdlp_download_args_with_mode(
             "https://example.com/watch?v=1",
             "/tmp/downloaded.%(ext)s",
             None,
             None,
+            false,
+            Some(YTDLP_YOUTUBE_EXTRACTOR_ARGS),
         );
 
         assert_eq!(
@@ -1716,5 +2211,98 @@ mod tests {
                 "https://example.com/watch?v=1",
             ]
         );
+    }
+
+    #[test]
+    fn prefers_best_audio_only_format_over_video_formats() {
+        let formats = vec![
+            seed_format(FormatSeed {
+                id: "22",
+                ext: "mp4",
+                acodec: "mp4a.40.2",
+                vcodec: "avc1",
+                height: Some(720),
+                tbr: Some(1400.0),
+                abr: Some(128.0),
+            }),
+            seed_format(FormatSeed {
+                id: "251",
+                ext: "webm",
+                acodec: "opus",
+                vcodec: "none",
+                height: None,
+                tbr: Some(160.0),
+                abr: Some(160.0),
+            }),
+            seed_format(FormatSeed {
+                id: "140",
+                ext: "m4a",
+                acodec: "mp4a.40.2",
+                vcodec: "none",
+                height: None,
+                tbr: Some(128.0),
+                abr: Some(128.0),
+            }),
+        ];
+
+        let selected = select_best_format_id(&formats);
+        assert_eq!(selected, Some("251".to_string()));
+    }
+
+    #[test]
+    fn falls_back_to_muxed_when_only_video_plus_audio_exists() {
+        let formats = vec![seed_format(FormatSeed {
+            id: "18",
+            ext: "mp4",
+            acodec: "mp4a.40.2",
+            vcodec: "avc1",
+            height: Some(360),
+            tbr: Some(600.0),
+            abr: Some(96.0),
+        })];
+
+        let selected = select_best_format_id(&formats);
+        assert_eq!(selected, Some("18".to_string()));
+    }
+
+    #[test]
+    fn falls_back_to_best_audio_only_format_when_needed() {
+        let formats = vec![
+            seed_format(FormatSeed {
+                id: "140",
+                ext: "m4a",
+                acodec: "mp4a.40.2",
+                vcodec: "none",
+                height: None,
+                tbr: Some(128.0),
+                abr: Some(128.0),
+            }),
+            seed_format(FormatSeed {
+                id: "251",
+                ext: "webm",
+                acodec: "opus",
+                vcodec: "none",
+                height: None,
+                tbr: Some(160.0),
+                abr: Some(160.0),
+            }),
+        ];
+
+        let selected = select_best_format_id(&formats);
+        assert_eq!(selected, Some("140".to_string()));
+    }
+
+    #[test]
+    fn sanitizes_youtube_watch_link_by_removing_playlist_params() {
+        let input = "https://www.youtube.com/watch?v=84EEjgSEOFM&list=RDu9MvjaG0OQY&index=29";
+        let output = sanitize_job_url(input);
+        assert_eq!(output, "https://www.youtube.com/watch?v=84EEjgSEOFM");
+    }
+
+    #[test]
+    fn sanitizes_youtu_be_link_by_removing_tracking_params() {
+        let input = "https://youtu.be/Rf_TfHK3-3g?si=Bcjsy1kaATTg_4Uy";
+        let output = sanitize_job_url(input);
+        assert_eq!(output, "https://www.youtube.com/watch?v=Rf_TfHK3-3g");
     }
 }
