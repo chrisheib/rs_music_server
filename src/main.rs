@@ -324,13 +324,14 @@ struct Song {
     rating: i32,
     vote: i32,
     times_played: i32,
+    last_played: Option<String>,
 }
 
 #[get("/songs")]
 async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
     println!("net_songlist");
     db_update()?;
-    let sql = "select id, path, filename, songname, artist, album, length, seconds, rating, vote, times_played from songs where deleted = 0";
+    let sql = "select id, path, filename, songname, artist, album, length, seconds, rating, vote, times_played, last_played from songs where deleted = 0";
 
     let c = db_con()?;
     let mut stmt = c.prepare(sql).wrap_err("prepare")?;
@@ -347,6 +348,7 @@ async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
             rating: row.get::<_, i32>(8)?,
             vote: row.get::<_, i32>(9)?,
             times_played: row.get::<_, i32>(10)?,
+            last_played: row.get::<_, Option<String>>(11)?,
         })
     });
 
@@ -359,7 +361,7 @@ async fn net_songlist() -> MyRes<web::Json<Vec<Song>>> {
 async fn net_songlist_web(app: Data<AppState>) -> MyRes<HttpResponse> {
     println!("net_songlist_web");
     db_update()?;
-    let sql = "select id, path, filename, songname, artist, album, length, seconds, rating, vote, times_played from songs where deleted = 0";
+    let sql = "select id, path, filename, songname, artist, album, length, seconds, rating, vote, times_played, last_played from songs where deleted = 0";
 
     let c = db_con()?;
     let mut stmt = c.prepare(sql).wrap_err("prepare")?;
@@ -377,6 +379,7 @@ async fn net_songlist_web(app: Data<AppState>) -> MyRes<HttpResponse> {
                 rating: row.get::<_, i32>(8)?,
                 vote: row.get::<_, i32>(9)?,
                 times_played: row.get::<_, i32>(10)?,
+                last_played: row.get::<_, Option<String>>(11)?,
             })
         })
         .unwrap()
@@ -448,7 +451,8 @@ fn get_songdata_json(id: u32) -> MyRes<JsonValue> {
                 seconds: row.get(7).unwrap_or(0),
                 rating: row.get(8).unwrap_or(0),
                 vote: row.get(9).unwrap_or(0),
-                times_played: row.get(11).unwrap_or(0)
+                times_played: row.get(11).unwrap_or(0),
+                last_played: row.get(12).unwrap_or_else(|_a| "".to_string())
             })
         },
     )
@@ -542,7 +546,16 @@ fn get_weighted_random_id(scale: f32) -> MyRes<String> {
     println!("get_weighted_random_id");
     let c = db_con()?;
 
-    let mut stmt = c.prepare("select rating, id from songs where deleted = 0 and rating > 0")?;
+    let mut stmt = c.prepare(
+        "select rating, id
+        from songs
+        where deleted = 0
+          and rating > 0
+          and (
+              last_played is null
+              or datetime(last_played) <= datetime('now', '-20 hours')
+          )",
+    )?;
 
     let rows = stmt.query_map([], |row| -> Result<(u32, i32), rusqlite::Error> {
         Ok((row.get::<usize, u32>(0)?, row.get::<usize, i32>(1)?))
@@ -557,6 +570,12 @@ fn get_weighted_random_id(scale: f32) -> MyRes<String> {
             (rating, a.1)
         })
         .collect_vec();
+
+    if map.is_empty() {
+        Err(eyre!(
+            "No shuffle candidates available: all songs are within the 20-hour cooldown"
+        ))?;
+    }
 
     let mut c: i32;
 
@@ -580,7 +599,15 @@ fn get_weighted_random_id(scale: f32) -> MyRes<String> {
     }
     drop(inner);
 
+    mark_last_played(c as u32)?;
+
     Ok(c.to_string())
+}
+
+fn mark_last_played(id: u32) -> MyRes<()> {
+    println!("mark_last_played({id})");
+    let sql = "update songs set last_played = datetime('now') where id = ?";
+    db_execute(sql, [id])
 }
 
 pub fn rng(map: &[(usize, i32)]) -> MyRes<i32> {

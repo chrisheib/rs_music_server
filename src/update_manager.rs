@@ -29,7 +29,8 @@ pub fn db_update() -> MyRes<()> {
                 "2" => v2()?,
                 "3" => v3()?,
                 "4" => v4()?,
-                "5" => break,
+                "5" => v5()?,
+                "6" => break,
                 _ => Err(eyre!("Unbekannte Versionsnummer!"))?,
             }
         }
@@ -129,4 +130,13 @@ fn v4() -> MyRes<()> {
         [],
     )?;
     db_execute("UPDATE config SET value = '5' WHERE key LIKE 'version'", [])
+}
+
+fn v5() -> MyRes<()> {
+    db_execute("ALTER TABLE songs ADD COLUMN last_played TEXT", [])?;
+    db_execute(
+        "CREATE INDEX IF NOT EXISTS idx_songs_last_played ON songs (last_played)",
+        [],
+    )?;
+    db_execute("UPDATE config SET value = '6' WHERE key LIKE 'version'", [])
 }

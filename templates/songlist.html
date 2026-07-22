@@ -147,7 +147,8 @@
                     song.artist,
                     song.album,
                     song.rating,
-                    song.times_played
+                    song.times_played,
+                    song.last_played || ''
                 ]),
                 columns: [
                     { type: 'number', title: 'ID', width: 100, readOnly: true },
@@ -156,7 +157,8 @@
                     { type: 'text', title: 'Artist', width: 250 },
                     { type: 'text', title: 'Album', width: 250 },
                     { type: 'number', title: 'Rating', width: 70 },
-                    { type: 'number', title: 'Played', width: 100, readOnly: true }
+                    { type: 'number', title: 'Played', width: 100, readOnly: true },
+                    { type: 'text', title: 'Last Played', width: 180, readOnly: true }
                 ]
             }],
         });
@@ -164,7 +166,13 @@
         js[0].orderBy(0, 1); // 1 = column index (Filename), 1 = descending
 
 
+        const DEFAULT_PLAYER_VOLUME = 0.05;
+
         // Initialize the audio player
+        const audioElement = document.querySelector('.gap-example audio');
+        if (audioElement) {
+            audioElement.volume = DEFAULT_PLAYER_VOLUME;
+        }
         new GreenAudioPlayer('.gap-example');
 
         function changeSong() {
