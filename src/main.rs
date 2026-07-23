@@ -21,15 +21,12 @@ use minijinja_autoreload::AutoReloader;
 use rand::{distributions::WeightedIndex, prelude::Distribution, thread_rng};
 use rusqlite::Statement;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::{
     env,
     fs::{self, File},
     io::Write,
     path::PathBuf,
-};
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
 };
 use tokio::join;
 use walkdir::WalkDir;
@@ -42,10 +39,7 @@ mod update_manager;
 
 type MyRes<T> = Result<T, Box<dyn std::error::Error>>;
 
-type Mylist = Arc<Mutex<Vec<i32>>>;
-
 lazy_static! {
-        static ref LAST_SONGS: Mylist = Arc::new(Mutex::new(Vec::new()));
     static ref GL_PORT: i16 = env::var("PORT")
         .map(|v| v.parse::<i16>().unwrap_or(3000))
         .unwrap_or(3000);
@@ -78,7 +72,6 @@ const GL_INSERT_SONG_STMT: &str = "INSERT INTO songs (path, filename, songname, 
 const GL_RATING_BASE: i32 = 2i32;
 const GL_DEFAULT_RATING_SCALE: f32 = 2.5f32;
 const GL_DEBUG_SIZE: bool = false;
-const GL_REPLAY_PROTECTION: usize = 15;
 const BUILD_TIMESTAMP_FILENAME: &str = "build-timestamp.txt";
 
 struct AppState {
@@ -550,61 +543,44 @@ fn get_weighted_random_id(scale: f32) -> MyRes<String> {
         "select rating, id
         from songs
         where deleted = 0
-          and rating > 0
+          and rating > 1
           and (
               last_played is null
-              or datetime(last_played) <= datetime('now', '-20 hours')
-          )",
+              or datetime(last_played) <= datetime('now', '-40 hours')
+          )
+        order by last_played asc, id asc",
     )?;
 
     let rows = stmt.query_map([], |row| -> Result<(u32, i32), rusqlite::Error> {
         Ok((row.get::<usize, u32>(0)?, row.get::<usize, i32>(1)?))
     })?;
 
-    let map = rows
+    let res = rows.into_iter().collect::<Result<Vec<(u32, i32)>, _>>()?;
+
+    let len = res.len();
+
+    let map = res
         .into_iter()
-        .collect::<Result<Vec<(u32, i32)>, _>>()?
-        .into_iter()
-        .map(|a| {
-            let rating = scale_rating(scale, a.0 as i32 - 1);
+        .enumerate()
+        .map(|(index, a)| {
+            let rating = scale_rating(scale, a.0 as f32 - 1.0 + (index as f32 / len as f32));
             (rating, a.1)
         })
         .collect_vec();
 
     if map.is_empty() {
         Err(eyre!(
-            "No shuffle candidates available: all songs are within the 20-hour cooldown"
+            "No shuffle candidates available: all songs are within the 40-hour cooldown"
         ))?;
     }
 
-    let mut c: i32;
+    let chosen_id = rng(&map)?;
+    mark_last_played(chosen_id)?;
 
-    let lasts = LAST_SONGS.clone();
-    let Ok(mut inner) = lasts.lock() else {
-        Err(eyre!("Could not acquire mutex!"))?;
-        unreachable!();
-    };
-    loop {
-        c = rng(&map)?;
-
-        if !inner.contains(&c) {
-            if inner.len() >= GL_REPLAY_PROTECTION {
-                inner.remove(0);
-            }
-            inner.push(c);
-            break;
-        } else {
-            println!("{c} ist schon in der Liste!");
-        }
-    }
-    drop(inner);
-
-    mark_last_played(c as u32)?;
-
-    Ok(c.to_string())
+    Ok(chosen_id.to_string())
 }
 
-fn mark_last_played(id: u32) -> MyRes<()> {
+fn mark_last_played(id: i32) -> MyRes<()> {
     println!("mark_last_played({id})");
     let sql = "update songs set last_played = datetime('now') where id = ?";
     db_execute(sql, [id])
@@ -694,9 +670,9 @@ async fn net_update_songdata_by_id_post(
     Ok(format!("Updated song with ID: {id}"))
 }
 
-fn scale_rating(scale: f32, weight: i32) -> usize {
+fn scale_rating(scale: f32, weight: f32) -> usize {
     // Scale the rating based on the provided scale factor
-    scale.powi(weight).ceil() as usize
+    scale.powf(weight).ceil() as usize
 }
 
 #[test]
@@ -712,7 +688,7 @@ fn test() {
     let mut map = Vec::new();
     let mut rand = rand::thread_rng();
     for i in 0..5000 {
-        let weight = rand.gen_range(0..=6);
+        let weight = rand.gen_range(0.0..=6.0);
         let rating = scale_rating(SCALE, weight);
         map.push((rating, i));
     }
@@ -734,7 +710,7 @@ fn test() {
     for r in 0..7 {
         let m = v
             .iter()
-            .filter(|((a, _), _)| *a == scale_rating(SCALE, r))
+            .filter(|((a, _), _)| *a == scale_rating(SCALE, r as f32))
             .collect_vec();
 
         mylog(&format!("r: {:?}", m.last()));
@@ -763,13 +739,13 @@ fn get_scale() {
     mylog(&format!("count_7: {count_7}"));
 
     for i in 1..100 {
-        let lower = scale_rating(i as f32 / 10.0, 1) as u32 * count_1
-            + scale_rating(i as f32 / 10.0, 2) as u32 * count_2
-            + scale_rating(i as f32 / 10.0, 3) as u32 * count_3
-            + scale_rating(i as f32 / 10.0, 4) as u32 * count_4;
-        let upper = scale_rating(i as f32 / 10.0, 5) as u32 * count_5
-            + scale_rating(i as f32 / 10.0, 6) as u32 * count_6
-            + scale_rating(i as f32 / 10.0, 7) as u32 * count_7;
+        let lower = scale_rating(i as f32 / 10.0, 1.0) as u32 * count_1
+            + scale_rating(i as f32 / 10.0, 2.0) as u32 * count_2
+            + scale_rating(i as f32 / 10.0, 3.0) as u32 * count_3
+            + scale_rating(i as f32 / 10.0, 4.0) as u32 * count_4;
+        let upper = scale_rating(i as f32 / 10.0, 5.0) as u32 * count_5
+            + scale_rating(i as f32 / 10.0, 6.0) as u32 * count_6
+            + scale_rating(i as f32 / 10.0, 7.0) as u32 * count_7;
         mylog(&format!("scale: {i}, lower: {lower}, upper: {upper}"));
         if upper > lower {
             mylog("done!");
