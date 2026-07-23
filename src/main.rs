@@ -548,7 +548,7 @@ fn get_weighted_random_id(scale: f32) -> MyRes<String> {
               last_played is null
               or datetime(last_played) <= datetime('now', '-40 hours')
           )
-        order by last_played asc, id asc",
+        order by last_played desc, id asc",
     )?;
 
     let rows = stmt.query_map([], |row| -> Result<(u32, i32), rusqlite::Error> {
